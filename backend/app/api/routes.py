@@ -88,6 +88,7 @@ from app.services.geometry import optimal_rotation_angle as _optimal_rotation_an
 from app.services.image_ingest import ImageTooLargeError, ingest_image
 from app.services.image_processor import ImageProcessor
 from app.services.image_service import generate_tool_thumbnail
+from app.services.object_geometry import CanonicalOutline
 from app.services.photo_checks import check_photo, extract_focal_length_35mm
 from app.services.photo_station_store import PhotoStationStore
 from app.services.polygon_scaler import PolygonScaler, ScaledFingerHole, ScaledPolygon
@@ -1680,6 +1681,8 @@ async def save_tools_from_session(request: Request, session_id: str, body: SaveT
         centered, fholes, interior_rings = polygon_scaler.scale_and_centre(poly, sf)
         if not centered:
             continue
+        outline = CanonicalOutline.from_points((p.x, p.y) for p in centered)
+        centered = [Point(x=x, y=y) for x, y in outline.points]
 
         tool_id = str(uuid.uuid4())
         source_transform = _polygon_source_transform(poly, sf)

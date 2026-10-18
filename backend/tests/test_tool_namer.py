@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.api import routes
 from app.config import ensure_user_dirs
 from app.main import app
-from app.models.schemas import Point, Polygon, Session
+from app.models.schemas import FingerHole, Point, Polygon, Session
 from app.services.tool_namer import (
     FallbackToolNamer,
     OllamaToolNamer,
@@ -22,6 +22,7 @@ from app.services.tool_namer import (
     parse_label_response,
     validate_label,
 )
+from app.services.tool_store import ToolStore
 
 
 def _square_poly(label: str = "tool 1") -> Polygon:
@@ -269,3 +270,54 @@ def test_save_tools_from_session_persists_polygon_label(tmp_path, monkeypatch):
     assert response.status_code == 200
     tool_id = response.json()["tool_ids"][0]
     assert tools.get(tool_id).name == "hacksaw"
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["ccw", "cw"])
+@pytest.mark.parametrize("start", range(4))
+@pytest.mark.parametrize("closed", [False, True], ids=["open", "closed-with-duplicate"])
+def test_save_tools_canonical_outer_ring(tmp_path, monkeypatch, reverse, start, closed):
+    monkeypatch.setattr(routes.settings, "storage_path", tmp_path)
+    monkeypatch.setattr(routes, "_store_cache", {})
+    ensure_user_dirs(tmp_path / "default")
+    sessions, tools, _ = routes.get_stores("default")
+    vertices = [(20, 40), (100, 40), (80, 80), (20, 80)]
+    if reverse:
+        vertices.reverse()
+    vertices = vertices[start:] + vertices[:start]
+    if closed:
+        vertices = vertices[:1] + vertices + vertices[:1]
+    poly = Polygon(
+        id="poly-1", label="probe",
+        points=[Point(x=x, y=y) for x, y in vertices],
+        finger_holes=[FingerHole(
+            id="hole-1", x=40, y=60, radius=3, shape="rectangle",
+            width=7, height=5, rotation=27, depth_override=4,
+        )],
+        interior_rings=[[
+            Point(x=50, y=50), Point(x=40, y=50),
+            Point(x=40, y=60), Point(x=50, y=50),
+        ]],
+    )
+    sessions.set("session-1", Session(id="session-1", scale_factor=0.5, polygons=[poly]))
+    response = TestClient(app).post("/api/sessions/session-1/save-tools", json={})
+    assert response.status_code == 200, response.text
+    (tool_id,) = response.json()["tool_ids"]
+    # Reload the persisted representation, including its Point list type.
+    tool = ToolStore(tools.file_path.parent).get(tool_id)
+    assert isinstance(tool.points, list)
+    assert all(isinstance(p, Point) for p in tool.points)
+    ring = [(p.x, p.y) for p in tool.points]
+    assert ring == [(-20, -10), (20, -10), (10, 10), (-20, 10)]
+    assert ring[0] == min(ring)
+    assert sum(x * ny - nx * y for (x, y), (nx, ny) in zip(ring, ring[1:] + ring[:1])) > 0
+    # The original 80 x 40 px bounds become 40 x 20 mm, centered at zero.
+    assert (min(p.x for p in tool.points), max(p.x for p in tool.points)) == (-20, 20)
+    assert (min(p.y for p in tool.points), max(p.y for p in tool.points)) == (-10, 10)
+    assert tool.finger_holes == [poly.finger_holes[0].model_copy(update={"x": -10, "y": 0})]
+    # Preserve the interior ring's winding, cyclic start and closing duplicate.
+    assert tool.interior_rings == [[
+        Point(x=-5, y=-5), Point(x=-10, y=-5),
+        Point(x=-10, y=0), Point(x=-5, y=-5),
+    ]]
+    assert tool.source_image_transform == [0.5, 0, 0, 0.5, -30, -30]
+    assert sessions.get("session-1").polygons == [poly]
