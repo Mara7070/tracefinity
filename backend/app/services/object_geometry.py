@@ -64,6 +64,28 @@ class CanonicalOutline:
         """Copy and normalize an open or explicitly closed input ring."""
         return cls(tuple(points))
 
+    def translated(self, dx: float, dy: float) -> "CanonicalOutline":
+        """Return a canonical copy shifted by finite offsets in the input units."""
+        dx, dy = float(dx), float(dy)
+        if not isfinite(dx) or not isfinite(dy):
+            raise ValueError("Translation offsets must be finite")
+        return CanonicalOutline.from_points((x + dx, y + dy) for x, y in self.points)
+
+    def rotated_quarter_turns(self, turns: int) -> "CanonicalOutline":
+        """Return a canonical copy rotated counter-clockwise about the origin."""
+        if not isinstance(turns, int) or isinstance(turns, bool):
+            raise TypeError("Quarter turns must be an integer")
+        turns %= 4
+        if turns == 1:
+            points = ((-y, x) for x, y in self.points)
+        elif turns == 2:
+            points = ((-x, -y) for x, y in self.points)
+        elif turns == 3:
+            points = ((y, -x) for x, y in self.points)
+        else:
+            points = iter(self.points)
+        return CanonicalOutline.from_points(points)
+
     @property
     def signed_area(self) -> float:
         return _signed_area(self.points)
