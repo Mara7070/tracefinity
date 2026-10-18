@@ -104,3 +104,47 @@ class CanonicalOutline:
     def height(self) -> float:
         _, min_y, _, max_y = self.bounds
         return max_y - min_y
+
+
+@dataclass(frozen=True)
+class PlacedOutline:
+    """An outline rotated about the origin, then translated in its current units."""
+
+    outline: CanonicalOutline
+    x: float = 0.0
+    y: float = 0.0
+    quarter_turns: int = 0
+
+    def __post_init__(self) -> None:
+        x, y = float(self.x), float(self.y)
+        if not isfinite(x) or not isfinite(y):
+            raise ValueError("Translation offsets must be finite")
+        if not isinstance(self.quarter_turns, int) or isinstance(self.quarter_turns, bool):
+            raise TypeError("Quarter turns must be an integer")
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "y", y)
+        object.__setattr__(self, "quarter_turns", self.quarter_turns % 4)
+
+    @property
+    def transformed(self) -> CanonicalOutline:
+        return self.outline.rotated_quarter_turns(self.quarter_turns).translated(self.x, self.y)
+
+    @property
+    def points(self) -> tuple[tuple[float, float], ...]:
+        return self.transformed.points
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self.transformed.bounds
+
+    @property
+    def width(self) -> float:
+        return self.transformed.width
+
+    @property
+    def height(self) -> float:
+        return self.transformed.height
+
+    @property
+    def signed_area(self) -> float:
+        return self.transformed.signed_area

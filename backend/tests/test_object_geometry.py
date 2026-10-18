@@ -4,7 +4,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from itertools import product
 
-from app.services.object_geometry import CanonicalOutline
+from app.services.object_geometry import CanonicalOutline, PlacedOutline
 
 RECTANGLE = ((-2.0, -1.0), (4.0, -1.0), (4.0, 3.0), (-2.0, 3.0))
 
@@ -151,6 +151,75 @@ class CanonicalOutlineTests(unittest.TestCase):
                 with self.subTest(ring=ring):
                     self.assertEqual(CanonicalOutline.from_points(ring), expected)
         self.assertGreater(expected.signed_area, 0)
+
+
+class PlacedOutlineTests(unittest.TestCase):
+    def setUp(self):
+        self.outline = CanonicalOutline.from_points(((1, 2), (5, 2), (2, 4)))
+
+    def test_default_placement_is_identity(self):
+        placed = PlacedOutline(self.outline)
+        self.assertIs(placed.outline, self.outline)
+        self.assertEqual((placed.x, placed.y, placed.quarter_turns), (0.0, 0.0, 0))
+        self.assertEqual(placed.transformed, self.outline)
+        self.assertEqual(placed.points, self.outline.points)
+
+    def test_rotation_precedes_translation(self):
+        placed = PlacedOutline(self.outline, x=10, y=-3, quarter_turns=1)
+        self.assertEqual(placed.points, ((6.0, -1.0), (8.0, -2.0), (8.0, 2.0)))
+        self.assertEqual(self.outline.points, ((1.0, 2.0), (5.0, 2.0), (2.0, 4.0)))
+
+    def test_normalization_bounds_dimensions_and_area(self):
+        expected_bounds = (
+            (11.0, -1.0, 15.0, 1.0),
+            (6.0, -2.0, 8.0, 2.0),
+            (5.0, -7.0, 9.0, -5.0),
+            (12.0, -8.0, 14.0, -4.0),
+        )
+        for turns in range(-12, 13):
+            with self.subTest(turns=turns):
+                placed = PlacedOutline(self.outline, 10, -3, turns)
+                self.assertEqual(placed.quarter_turns, turns % 4)
+                self.assertEqual(placed.bounds, expected_bounds[turns % 4])
+                self.assertEqual((placed.width, placed.height),
+                                 (2.0, 4.0) if turns % 2 else (4.0, 2.0))
+                self.assertEqual(placed.signed_area, 4.0)
+                self.assertEqual(placed.transformed,
+                                 self.outline.rotated_quarter_turns(turns).translated(10, -3))
+
+    def test_offsets_are_stored_as_floats(self):
+        placed = PlacedOutline(self.outline, x="2.5", y=-7)
+        self.assertEqual((placed.x, placed.y), (2.5, -7.0))
+        self.assertIs(type(placed.x), float)
+        self.assertIs(type(placed.y), float)
+
+    def test_nonfinite_offsets_are_rejected(self):
+        for value in (float("nan"), float("inf"), -float("inf"), "nan", "inf"):
+            for offsets in ((value, 0), (0, value)):
+                with self.subTest(offsets=offsets), self.assertRaisesRegex(ValueError, "finite"):
+                    PlacedOutline(self.outline, *offsets)
+
+    def test_noninteger_quarter_turns_are_rejected(self):
+        for turns in (1.5, 1.0, "1", None, True, False, float("nan"), float("inf")):
+            with self.subTest(turns=turns), self.assertRaises(TypeError):
+                PlacedOutline(self.outline, quarter_turns=turns)
+
+    def test_placement_and_transformed_geometry_are_immutable(self):
+        placed = PlacedOutline(self.outline, 10, -3, 1)
+        for field, value in (("outline", self.outline), ("x", 0), ("y", 0),
+                             ("quarter_turns", 0)):
+            with self.subTest(field=field), self.assertRaises(FrozenInstanceError):
+                setattr(placed, field, value)
+        transformed = placed.transformed
+        self.assertIsInstance(transformed, CanonicalOutline)
+        self.assertIsNot(transformed, self.outline)
+        self.assertEqual(CanonicalOutline.from_points(transformed.points), transformed)
+        self.assertIsInstance(transformed.points, tuple)
+        self.assertTrue(all(isinstance(point, tuple) for point in transformed.points))
+        with self.assertRaises(FrozenInstanceError):
+            transformed.points = ()
+        with self.assertRaises(TypeError):
+            transformed.points[0][0] = 99
 
 
 if __name__ == "__main__":
