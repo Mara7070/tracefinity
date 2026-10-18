@@ -1550,10 +1550,14 @@ async def update_tool(request: Request, tool_id: str, req: ToolUpdateRequest, us
     if not tool:
         raise HTTPException(status_code=404, detail="tool not found")
 
+    if req.points is not None:
+        try:
+            outline = CanonicalOutline.from_points((p.x, p.y) for p in req.points)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        tool.points = [Point(x=x, y=y) for x, y in outline.points]
     if req.name is not None:
         tool.name = req.name
-    if req.points is not None:
-        tool.points = req.points
     if req.finger_holes is not None:
         tool.finger_holes = req.finger_holes
     if req.interior_rings is not None:
