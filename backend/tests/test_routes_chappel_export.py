@@ -168,7 +168,8 @@ def test_real_service_invalid_input(api, params):
 
 
 @pytest.mark.parametrize("same_tool", [True, False])
-def test_generation_serialization(api, monkeypatch, same_tool):
+@pytest.mark.parametrize("multi", [False, True])
+def test_generation_serialization(api, monkeypatch, same_tool, multi):
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
     from threading import Event, local
@@ -206,7 +207,7 @@ def test_generation_serialization(api, monkeypatch, same_tool):
             assert release_first.wait(5)
         else:
             second_entered.set()
-        args[4].write_bytes(b"artifact")
+        args[5 if multi else 4].write_bytes(b"artifact")
 
     original_response = api.routes.FileResponse
 
@@ -216,16 +217,21 @@ def test_generation_serialization(api, monkeypatch, same_tool):
 
     monkeypatch.setattr(api.store, "get", get)
     monkeypatch.setattr(api.routes, "generation_lock", observed_lock)
-    monkeypatch.setattr(api.routes, "export_minimal_chappel_tool", write)
+    monkeypatch.setattr(api.routes,
+                        "export_minimal_chappel_tools" if multi else "export_minimal_chappel_tool",
+                        write)
     monkeypatch.setattr(api.routes, "FileResponse", response)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(export, api)
+        first = pool.submit(export_tools if multi else export, api)
         try:
             assert first_entered.wait(5)
-            second = pool.submit(api.client.post,
-                                 f"/api/tools/{second_id}/export-chappel",
-                                 params=dict(max_cells_x=3, max_cells_y=4,
-                                             depth=12.5, format="step"))
+            if multi:
+                second = pool.submit(export_tools, api, tool_ids=[second_id], gap=3)
+            else:
+                second = pool.submit(api.client.post,
+                                     f"/api/tools/{second_id}/export-chappel",
+                                     params=dict(max_cells_x=3, max_cells_y=4,
+                                                 depth=12.5, format="step"))
             assert second_attempted.wait(5)
             if same_tool:
                 assert not second_entered.wait(0.1)
@@ -238,9 +244,150 @@ def test_generation_serialization(api, monkeypatch, same_tool):
         assert first.result(timeout=5).status_code == 200
         assert second.result(timeout=5).status_code == 200
     assert second_entered.is_set()
+    if multi:
+        import hashlib
+        import json
+        expected_keys = [
+            "chappel-tools:" + hashlib.sha256(json.dumps([tool_id]).encode("utf-8")).hexdigest()
+            for tool_id in (api.tool.id, second_id)
+        ]
+    else:
+        expected_keys = [f"chappel-tool:{tool_id}" for tool_id in (api.tool.id, second_id)]
     assert [(path, key) for path, key, _ in keys] == [
-        (api.outputs.parent, f"chappel-tool:{tool_id}")
-        for tool_id in (api.tool.id, second_id)
+        (api.outputs.parent, key) for key in expected_keys
     ]
     assert (keys[0][2] is keys[1][2]) == same_tool
     monkeypatch.setattr(api.store, "get", original_get)
+
+
+def export_tools(api, **overrides):
+    body = dict(tool_ids=[api.tool.id], max_cells_x=3, max_cells_y=4,
+                gap=2.5, depth=12.5, format="step")
+    body.update(overrides)
+    return api.client.post("/api/chappel/tools/export", json=body)
+
+
+@pytest.mark.parametrize("format,media", [("step", "model/step"), ("stl", "application/sla")])
+def test_multi_order_delegation_and_download(api, monkeypatch, format, media):
+    import uuid
+    other = api.tool.model_copy(update={"id": "second-tool"})
+    original_get = api.store.get
+    reads = []
+
+    def get(tool_id):
+        reads.append(tool_id)
+        return other if tool_id == other.id else original_get(tool_id)
+
+    def write(*args):
+        path = args[5]
+        assert path.parent == api.outputs
+        assert path.suffix == f".{format}"
+        uuid.UUID(path.name.split("_")[0])
+        path.write_bytes(b"multi artifact")
+
+    monkeypatch.setattr(api.store, "get", get)
+    service = Mock(side_effect=write)
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    ids = [other.id, api.tool.id, other.id]
+    response = export_tools(api, tool_ids=ids, format=format, inset=0.5, clearance=0.25)
+    assert response.status_code == 200
+    assert response.content == b"multi artifact"
+    assert response.headers["content-type"] == media
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="tracefinity-chappel-tools.{format}"'
+    )
+    assert reads == ids
+    service.assert_called_once_with([other, api.tool, other], 3, 4, 2.5, 12.5,
+                                    service.call_args.args[5], 0.5, 0.25)
+    assert service.call_args.args[0][0] is other
+    assert service.call_args.args[0][1] is api.tool
+    api.stores.assert_called_once_with("owner")
+    assert not service.call_args.args[5].exists()
+    monkeypatch.setattr(api.store, "get", original_get)
+
+
+def test_multi_auth_required(api, monkeypatch):
+    service = Mock()
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    api.client.cookies.clear()
+    assert export_tools(api).status_code == 401
+    service.assert_not_called()
+    api.stores.assert_not_called()
+
+
+@pytest.mark.parametrize("other_user", [False, True])
+def test_multi_missing_before_output(api, monkeypatch, other_user):
+    from app import auth
+    service = Mock()
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    if other_user:
+        monkeypatch.setattr(auth, "resolve_account", lambda request:
+                            SimpleNamespace(storage_namespace="other"))
+    uuid_call = Mock(side_effect=AssertionError("must resolve all tools before output"))
+    monkeypatch.setattr(api.routes.uuid, "uuid4", uuid_call)
+    response = export_tools(api, tool_ids=[api.tool.id, "missing"])
+    assert response.status_code == 404
+    assert response.json() == {"detail": "tool not found"}
+    service.assert_not_called()
+    uuid_call.assert_not_called()
+    assert list(api.outputs.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure_type", [ValueError, RuntimeError, OSError])
+def test_multi_failure_cleanup(api, monkeypatch, failure_type):
+    failure = failure_type("export failure")
+
+    def fail(*args):
+        args[5].write_bytes(b"partial")
+        raise failure
+
+    service = Mock(side_effect=fail)
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    if failure_type is ValueError:
+        response = export_tools(api)
+        assert response.status_code == 400
+        assert response.json() == {"detail": str(failure)}
+    else:
+        with pytest.raises(failure_type) as caught:
+            export_tools(api)
+        assert caught.value is failure
+    service.assert_called_once()
+    assert list(api.outputs.iterdir()) == []
+
+
+@pytest.mark.parametrize("body", [dict(format="3mf"), dict(tool_ids="bad"),
+                                  dict(max_cells_x=1.5), dict(gap="bad")])
+def test_multi_schema_validation(api, monkeypatch, body):
+    service = Mock()
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    assert export_tools(api, **body).status_code == 422
+    service.assert_not_called()
+
+
+@pytest.mark.parametrize("format", ["step", "stl"])
+def test_multi_real_download(api, format):
+    response = export_tools(api, tool_ids=[api.tool.id, api.tool.id], format=format,
+                            depth=12, inset=2)
+    assert response.status_code == 200
+    if format == "step":
+        assert response.content.startswith(b"ISO-10303-21;")
+    else:
+        import io
+        import trimesh
+        mesh = trimesh.load(io.BytesIO(response.content), file_type="stl", force="mesh")
+        assert mesh.is_watertight and mesh.is_volume
+    assert list(api.outputs.iterdir()) == []
+
+
+def test_multi_defaults_and_response_failure_cleanup(api, monkeypatch):
+    def write(*args):
+        assert args[6:] == (0.0, 0.0)
+        args[5].write_bytes(b"artifact")
+
+    service = Mock(side_effect=write)
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tools", service)
+    monkeypatch.setattr(api.routes, "FileResponse", Mock(side_effect=RuntimeError("response failed")))
+    with pytest.raises(RuntimeError, match="response failed"):
+        export_tools(api)
+    service.assert_called_once()
+    assert list(api.outputs.iterdir()) == []
