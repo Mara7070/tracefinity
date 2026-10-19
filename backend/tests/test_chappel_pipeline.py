@@ -160,7 +160,11 @@ def rectangular_tool():
 
 
 @pytest.mark.parametrize("string_path", [False, True])
-def test_minimal_exact_delegation(monkeypatch, tmp_path, rectangular_tool, placements, string_path):
+@pytest.mark.parametrize("inset,clearance,expected_inset", [
+    (0, 0, 4.0), (0.5, 0.25, 4.25), (5, 0.25, 5),
+])
+def test_minimal_exact_delegation(monkeypatch, tmp_path, rectangular_tool, placements, string_path,
+                                  inset, clearance, expected_inset):
     tool = rectangular_tool
     before = deepcopy(tool)
     placement = placements[0]
@@ -173,10 +177,10 @@ def test_minimal_exact_delegation(monkeypatch, tmp_path, rectangular_tool, place
     destination = tmp_path / "minimal.step"
     if string_path:
         destination = str(destination)
-    result = chappel_pipeline.export_minimal_chappel_tool(tool, 4, 5, 12.5, destination, 0.5, 0.25)
-    selector.assert_called_once_with(tool, 4, 5, 0.5)
+    result = chappel_pipeline.export_minimal_chappel_tool(tool, 4, 5, 12.5, destination, inset, clearance)
+    selector.assert_called_once_with(tool, 4, 5, expected_inset)
     assert selector.call_args.args[0] is tool
-    exporter.assert_called_once_with((placement,), 2, 3, 12.5, destination, 0.25)
+    exporter.assert_called_once_with((placement,), 2, 3, 12.5, destination, clearance)
     assert exporter.call_args.args[0][0] is placement
     assert exporter.call_args.args[4] is destination
     assert result is returned
@@ -254,14 +258,27 @@ def test_minimal_real_validation_errors(tmp_path, rectangular_tool, case):
 
 
 @pytest.mark.parametrize("suffix", [".step", ".stl"])
-def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix):
+@pytest.mark.parametrize("depth", [12, 23])
+@pytest.mark.parametrize("small", [False, True])
+@pytest.mark.parametrize("inset,clearance", [(0, 0), (0, 0.25), (5, 0.25)])
+def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix, depth, small, inset, clearance):
+    if small:
+        rectangular_tool = rectangular_tool.model_copy(update={"points": [
+            Point(x=x, y=y) for x, y in ((0, 0), (20, 0), (20, 10), (0, 10))
+        ]})
     before = deepcopy(rectangular_tool)
-    assert minimal_chappel_organizer_sizes(rectangular_tool, 3, 3) == ((1, 2), (2, 1))
-    blank = chappel_insert_blank(1, 2)
+    assert minimal_chappel_organizer_sizes(rectangular_tool, 3, 3) == (
+        ((1, 1),) if small else ((1, 2), (2, 1))
+    )
+    blank = chappel_insert_blank(1, 1 if small else 2)
     bounds = blank.bounding_box()
-    expected_volume = blank.volume - 60 * 20 * 12
+    width, height = (20, 10) if small else (60, 20)
+    # Layout reserves clearance, while CAD expands each pocket side only once.
+    expected_volume = blank.volume - (width + 2 * clearance) * (height + 2 * clearance) * depth
     destination = tmp_path / ("minimal" + suffix)
-    result = chappel_pipeline.export_minimal_chappel_tool(rectangular_tool, 3, 3, 12, destination)
+    result = chappel_pipeline.export_minimal_chappel_tool(
+        rectangular_tool, 3, 3, depth, destination, inset=inset, clearance=clearance,
+    )
     assert result == destination
     assert result.is_file() and result.stat().st_size > 0
     if suffix == ".step":
@@ -426,3 +443,23 @@ def test_tools_real_clearance_collision(tmp_path, ordered_tools):
     assert delegated.value.args == direct.value.args
     assert ordered_tools == before
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("field,message", [
+    ("inset", "Inset must be finite and non-negative"),
+    ("clearance", "clearance must be a finite nonnegative real number"),
+])
+@pytest.mark.parametrize("value", [True, False, -1, float("nan"), float("inf"),
+                                  -float("inf"), "0", None, 1j])
+def test_minimal_invalid_margin_before_selection(monkeypatch, tmp_path, rectangular_tool,
+                                                field, message, value):
+    selector = Mock()
+    exporter = Mock()
+    monkeypatch.setattr(chappel_pipeline, "first_minimal_chappel_organizer_fit", selector)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        chappel_pipeline.export_minimal_chappel_tool(
+            rectangular_tool, 3, 3, 12, tmp_path / "invalid.step", **{field: value},
+        )
+    selector.assert_not_called()
+    exporter.assert_not_called()

@@ -2,10 +2,13 @@
 
 import os
 from collections.abc import Sequence
+from math import isfinite
+from numbers import Real
 from pathlib import Path
 
 from app.models.schemas import Tool
 from app.services.chappel_brep import chappel_insert_with_pockets
+from app.services.chappel_dimensions import CHAPPEL
 from app.services.chappel_export import export_chappel_step, export_chappel_stl
 from app.services.chappel_tool_layout import (
     first_minimal_chappel_organizer_fit,
@@ -70,8 +73,22 @@ def export_minimal_chappel_tool(
     inset: float = 0.0,
     clearance: float = 0.0,
 ) -> Path:
-    """Select one minimum envelope and export through the explicit pipeline."""
-    selected = first_minimal_chappel_organizer_fit(tool, max_cells_x, max_cells_y, inset)
+    """Select an envelope reserving a conservative physical margin at all depths."""
+    if (isinstance(inset, bool) or not isinstance(inset, Real)
+            or not isfinite(inset) or inset < 0):
+        raise ValueError("Inset must be finite and non-negative")
+    if (isinstance(clearance, bool) or not isinstance(clearance, Real)
+            or not isfinite(clearance) or clearance < 0):
+        raise ValueError("clearance must be a finite nonnegative real number")
+    # At maximum depth the 2 mm floor keeps cutters above the bottom ramp.
+    # Reserve an axis-aligned region inside both rounded mid and full sections;
+    # recovered insets reduce the full footprint per axis, hence the half inset.
+    physical_inset = max(
+        CHAPPEL.insert_mid_inset / 2 + CHAPPEL.insert_mid_corner_radius,
+        CHAPPEL.insert_top_corner_radius,
+    )
+    effective_inset = max(inset, physical_inset + clearance)
+    selected = first_minimal_chappel_organizer_fit(tool, max_cells_x, max_cells_y, effective_inset)
     if selected is None:
         raise ValueError("tool does not fit within the supplied Chappel cell bounds")
     cells_x, cells_y, placement = selected
