@@ -9,11 +9,14 @@ from OCP.TopoDS import TopoDS_Solid
 
 from app.services.chappel_brep import (
     chappel_insert_blank,
+    chappel_insert_with_pocket,
     chappel_organizer_blank,
     chappel_v2_foot_array,
     chappel_v2_foot_cell,
 )
 from app.services.chappel_dimensions import CHAPPEL
+from app.services.object_geometry import CanonicalOutline, PlacedOutline
+from app.services.polygon_scaler import PolygonScaler, ScaledPolygon
 
 
 @pytest.mark.parametrize("cells_x, cells_y, expected_xy", [
@@ -202,3 +205,129 @@ def test_native_insert_sections(nx, ny, width, depth):
         assert len(arcs) == (4 if radius else 0)
         for arc in arcs:
             assert arc.radius == pytest.approx(radius, rel=0, abs=5e-7)
+
+
+@pytest.fixture
+def pocket_placement():
+    return PlacedOutline(CanonicalOutline.from_points(
+        ((0, 0), (20, 0), (20, 10), (0, 10)),
+    ), x=30, y=40)
+
+
+@pytest.mark.parametrize("depth", [5.0, 12.0, 23.0])
+def test_native_pocket(pocket_placement, depth):
+    blank = chappel_insert_blank(2, 3)
+    result = chappel_insert_with_pocket(pocket_placement, 2, 3, depth)
+    assert isinstance(result, Solid)
+    assert isinstance(result.wrapped, TopoDS_Solid)
+    assert len(result.solids()) == 1
+    assert BRepCheck_Analyzer(result.wrapped).IsValid()
+    for attr in ("min", "max"):
+        assert tuple(getattr(result.bounding_box(), attr)) == pytest.approx(
+            tuple(getattr(blank.bounding_box(), attr)), rel=0, abs=5e-7,
+        )
+    assert blank.volume - result.volume == pytest.approx(200 * depth, rel=0, abs=1e-6)
+    floor = 25 - depth
+    assert not result.is_inside((40, 45, 24.99))
+    assert not result.is_inside((40, 45, floor + 0.001))
+    assert result.is_inside((40, 45, floor - 0.001))
+    assert result.is_inside((29.99, 45, 24.99))
+
+
+def test_pocket_uses_transformed_placement(pocket_placement):
+    placement = PlacedOutline(pocket_placement.outline, x=70, y=60, quarter_turns=1)
+    result = chappel_insert_with_pocket(placement, 2, 3, 5)
+    assert not result.is_inside((65, 70, 24))
+    assert result.is_inside((75, 65, 24))
+    assert result.is_inside((40, 45, 24))
+    assert result.is_inside((65, 70, 19.99))
+
+
+def test_pocket_clearance_matches_existing_buffer(pocket_placement):
+    expected = PolygonScaler().add_clearance(
+        ScaledPolygon("expected", list(pocket_placement.points), ""), 1.0,
+    )
+    result = chappel_insert_with_pocket(pocket_placement, 2, 3, 5, 1.0)
+    # At a height inside the pocket, the section contains an outer envelope and
+    # the cavity wire. Measure the latter from the actual subtracted geometry.
+    operation = BRepAlgoAPI_Section(
+        result.wrapped, gp_Pln(gp_Pnt(0, 0, 23), gp_Dir(0, 0, 1)), False,
+    )
+    operation.Build()
+    edges = Compound(operation.Shape()).edges()
+    cavity_edges = [e for e in edges if 20 < e.center().X < 60 and 30 < e.center().Y < 60]
+    bounds = Compound(cavity_edges).bounding_box()
+    xs, ys = zip(*expected.points_mm)
+    assert tuple(bounds.min) == pytest.approx((min(xs), min(ys), 23), abs=5e-7)
+    assert tuple(bounds.max) == pytest.approx((max(xs), max(ys), 23), abs=5e-7)
+    assert chappel_insert_blank(2, 3).volume - result.volume == pytest.approx(
+        22 * 12 * 5, rel=0, abs=1e-6,
+    )
+
+
+def test_containment_is_depth_aware(pocket_placement):
+    placement = PlacedOutline(pocket_placement.outline, x=1, y=40)
+    assert chappel_insert_with_pocket(placement, 2, 3, 12).is_valid
+    with pytest.raises(ValueError, match="^Pocket is not fully contained within the Chappel insert$"):
+        chappel_insert_with_pocket(placement, 2, 3, 20)
+
+
+def test_clearance_can_breach_envelope(pocket_placement):
+    placement = PlacedOutline(pocket_placement.outline, x=0.5, y=40)
+    assert chappel_insert_with_pocket(placement, 2, 3, 5).is_valid
+    with pytest.raises(ValueError, match="Pocket is not fully contained"):
+        chappel_insert_with_pocket(placement, 2, 3, 5, 1.0)
+
+
+def test_rounded_corner_breach(pocket_placement):
+    placement = PlacedOutline(pocket_placement.outline, x=0.1, y=0.1)
+    with pytest.raises(ValueError, match="Pocket is not fully contained"):
+        chappel_insert_with_pocket(placement, 2, 3, 5)
+
+
+def test_pocket_preserves_concave_outline_detail():
+    outline = CanonicalOutline.from_points((
+        (0, 0), (20, 0), (20, 10), (10.1, 10),
+        (10.1, 9.8), (9.9, 9.8), (9.9, 10), (0, 10),
+    ))
+    placement = PlacedOutline(outline, x=30, y=40)
+    result = chappel_insert_with_pocket(placement, 2, 3, 5)
+    assert result.is_inside((40, 49.9, 24))
+    assert not result.is_inside((40, 49.7, 24))
+    assert chappel_insert_blank(2, 3).volume - result.volume == pytest.approx(
+        outline.signed_area * 5, rel=0, abs=1e-6,
+    )
+
+
+@pytest.mark.parametrize("depth", [True, False, None, "5", 1j, float("nan"), float("inf"), -float("inf"), 0, -1, 23.001])
+def test_invalid_pocket_depth(pocket_placement, depth):
+    with pytest.raises(ValueError, match="depth must"):
+        chappel_insert_with_pocket(pocket_placement, 2, 3, depth)
+
+
+@pytest.mark.parametrize("clearance", [True, False, None, "1", 1j, float("nan"), float("inf"), -float("inf"), -0.001])
+def test_invalid_pocket_clearance(pocket_placement, clearance):
+    with pytest.raises(ValueError, match="clearance must"):
+        chappel_insert_with_pocket(pocket_placement, 2, 3, 5, clearance)
+
+
+@pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1, "1", None])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_pocket_cell_validation(pocket_placement, invalid, axis):
+    cells = [2, 3]
+    cells[axis] = invalid
+    with pytest.raises(ValueError) as expected:
+        CHAPPEL.organizer_footprint_xy(*cells)
+    with pytest.raises(ValueError) as actual:
+        chappel_insert_with_pocket(pocket_placement, *cells, 5)
+    assert actual.value.args == expected.value.args
+
+
+def test_pocket_calls_are_independent_and_preserve_input(pocket_placement):
+    original = (pocket_placement.outline.points, pocket_placement.points, pocket_placement.bounds)
+    first = chappel_insert_with_pocket(pocket_placement, 2, 3, 5, 1)
+    second = chappel_insert_with_pocket(pocket_placement, 2, 3, 5, 1)
+    assert not first.wrapped.IsSame(second.wrapped)
+    first.move(Location((7, 8, 9)))
+    assert tuple(second.bounding_box().min) == pytest.approx((0, 0, 0), abs=5e-7)
+    assert (pocket_placement.outline.points, pocket_placement.points, pocket_placement.bounds) == original
