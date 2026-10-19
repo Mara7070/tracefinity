@@ -95,3 +95,20 @@ def test_recovered_foot_constants(name, expected):
         assert type(getattr(dimensions, name)) is float
         with pytest.raises(FrozenInstanceError):
             setattr(dimensions, name, 0)
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("insert_bottom_inset", 8.0),
+    ("insert_mid_inset", 6.0),
+    ("insert_bottom_ramp_z", 1.0),
+    ("insert_mid_top_z", 10.0),
+    ("insert_shoulder_top_z", 13.0),
+    ("insert_mid_corner_radius", 1.0),
+    ("insert_top_corner_radius", 3.0),
+])
+def test_recovered_insert_constants(name, expected):
+    for dimensions in (CHAPPEL, ChappelDimensions()):
+        assert getattr(dimensions, name) == expected
+        assert type(getattr(dimensions, name)) is float
+        with pytest.raises(FrozenInstanceError):
+            setattr(dimensions, name, 0)

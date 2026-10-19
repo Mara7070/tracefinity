@@ -1,6 +1,6 @@
 """Native Chappel B-rep blanks and recovered v2/40 mating feet."""
 
-from build123d import Compound, Location, Solid, Wire
+from build123d import Compound, Location, Plane, Solid, Wire
 
 from app.services.chappel_dimensions import CHAPPEL
 
@@ -14,6 +14,34 @@ def chappel_organizer_blank(cells_x: int, cells_y: int) -> Solid:
     """
     width, depth = CHAPPEL.organizer_footprint_xy(cells_x, cells_y)
     return Solid.make_box(width, depth, CHAPPEL.organizer_height)
+
+
+def chappel_insert_blank(cells_x: int, cells_y: int) -> Solid:
+    """Return the recovered solid 25-series external envelope in the XY frame.
+
+    Sections follow Mara7070/cad-apprenticeship/interfaces/chappel_insert.py:
+    centred lower sections, sharp bottom corners, and ruled transitions to the
+    rounded full footprint. This payload has no donor bowl cavity or mating foot.
+    CHAPPEL owns cell validation; dimensions are in millimetres.
+    """
+    d = CHAPPEL
+    width, depth = d.organizer_footprint_xy(cells_x, cells_y)
+    sections = []
+    for inset, z, radius in (
+        (d.insert_bottom_inset, 0, 0),
+        (d.insert_mid_inset, d.insert_bottom_ramp_z, d.insert_mid_corner_radius),
+        (d.insert_mid_inset, d.insert_mid_top_z, d.insert_mid_corner_radius),
+        (0, d.insert_shoulder_top_z, d.insert_top_corner_radius),
+        (0, d.organizer_height, d.insert_top_corner_radius),
+    ):
+        section = Wire.make_rect(
+            width - inset, depth - inset,
+            Plane(origin=(width / 2, depth / 2, z)),
+        )
+        if radius:
+            section = section.fillet_2d(radius, section.vertices())
+        sections.append(section)
+    return Solid.make_loft(sections, ruled=True)
 
 
 def _chamfered_square(size: float, chamfer: float, z: float) -> Wire:
