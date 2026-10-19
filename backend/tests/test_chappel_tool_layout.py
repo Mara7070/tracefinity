@@ -472,3 +472,106 @@ def test_greedy_preserves_delegate_exception_identity(monkeypatch):
     with pytest.raises(ValueError) as raised:
         chappel_tool_layout.place_tools_in_chappel_organizer([rectangle_tool(5, 5)], 1, 1, 1)
     assert raised.value is error
+
+
+minimal_tools = chappel_tool_layout.minimal_chappel_organizer_sizes_for_tools
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("dimensions,bounds,expected", [
+    ([(20, 10), (20, 10)], (3, 3), ((1, 1),)),
+    ([(40, 20), (40, 20)], (3, 3), ((1, 1),)),
+    ([(50, 50), (50, 50)], (3, 3), ((1, 2), (2, 1))),
+    ([(100, 20), (100, 20)], (3, 3), ((1, 2), (2, 1))),
+    ([(120, 20), (120, 20)], (2, 2), ()),
+])
+def test_minimal_tools_real_rectangles(container, dimensions, bounds, expected):
+    tools = container(rectangle_tool(*size) for size in dimensions)
+    before = deepcopy(tools)
+    refs = tuple(tools)
+    point_lists = [tool.points for tool in tools]
+    assert minimal_tools(tools, *bounds, 1) == expected
+    assert minimal_tools(tools, *bounds, 1) == expected
+    assert tools == before
+    assert all(a is b for a, b in zip(tools, refs))
+    assert all(tool.points is points for tool, points in zip(tools, point_lists))
+    if dimensions[0] == (100, 20):
+        assert chappel_tool_layout.place_tools_in_chappel_organizer(tools, 2, 2, 1) is not None
+    if not expected:
+        assert chappel_tool_layout.place_tools_in_chappel_organizer(tools, 3, 1, 1) is not None
+
+
+@pytest.mark.parametrize("qualifiers,expected", [
+    (set(), ()),
+    ({(1, 1), (2, 3)}, ((1, 1),)),
+    ({(1, 3), (2, 1), (2, 2)}, ((2, 1),)),
+    ({(1, 2), (2, 1), (2, 3)}, ((1, 2), (2, 1))),
+])
+def test_minimal_tools_exact_delegation(monkeypatch, qualifiers, expected):
+    tools = [make_tool([]), rectangle_tool(5, 5)]
+    gap, inset = 1.25, 0.75
+    calls = []
+
+    def delegate(actual_tools, x, y, actual_gap, actual_inset):
+        assert actual_tools is tools
+        assert actual_gap is gap
+        assert actual_inset is inset
+        calls.append((x, y))
+        # Even a falsey result qualifies when it is not None.
+        return () if (x, y) in qualifiers else None
+
+    monkeypatch.setattr(chappel_tool_layout, "place_tools_in_chappel_organizer", delegate)
+    assert minimal_tools(tools, 2, 3, gap, inset) == expected
+    assert calls == [(1, 1), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3)]
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1, None, "2"])
+def test_minimal_tools_strict_bounds(monkeypatch, axis, invalid):
+    def unexpected(*args):
+        pytest.fail("Invalid bounds must not delegate")
+
+    monkeypatch.setattr(chappel_tool_layout, "place_tools_in_chappel_organizer", unexpected)
+    bounds = [2, 3]
+    bounds[axis] = invalid
+    with pytest.raises(ValueError, match="cell bounds must be Python ints >= 1"):
+        minimal_tools([rectangle_tool(5, 5)], *bounds, 1)
+
+
+@pytest.mark.parametrize("tools", [[], ()])
+def test_minimal_tools_rejects_empty(monkeypatch, tools):
+    def unexpected(*args):
+        pytest.fail("Empty input must not delegate")
+
+    monkeypatch.setattr(chappel_tool_layout, "place_tools_in_chappel_organizer", unexpected)
+    with pytest.raises(ValueError, match="tools must be nonempty"):
+        minimal_tools(tools, 2, 3, 1)
+
+
+@pytest.mark.parametrize("tool,gap,inset", [
+    (rectangle_tool(5, 5), -1, 0),
+    (rectangle_tool(5, 5), True, 0),
+    (rectangle_tool(5, 5), float("nan"), 0),
+    (rectangle_tool(5, 5), 1, -1),
+    (rectangle_tool(5, 5), 1, float("inf")),
+    (make_tool([]), 1, 0),
+])
+def test_minimal_tools_delegated_validation(tool, gap, inset):
+    tools = [tool]
+    with pytest.raises(ValueError) as expected:
+        chappel_tool_layout.place_tools_in_chappel_organizer(tools, 1, 1, gap, inset)
+    with pytest.raises(type(expected.value)) as raised:
+        minimal_tools(tools, 2, 3, gap, inset)
+    assert str(raised.value) == str(expected.value)
+
+
+def test_minimal_tools_preserves_exception_identity(monkeypatch):
+    error = ValueError("delegated validation failure")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(chappel_tool_layout, "place_tools_in_chappel_organizer", fail)
+    with pytest.raises(ValueError) as raised:
+        minimal_tools([rectangle_tool(5, 5)], 2, 3, 1)
+    assert raised.value is error
