@@ -10,6 +10,7 @@ from OCP.TopoDS import TopoDS_Solid
 from app.services.chappel_brep import (
     chappel_insert_blank,
     chappel_insert_with_pocket,
+    chappel_insert_with_pockets,
     chappel_organizer_blank,
     chappel_v2_foot_array,
     chappel_v2_foot_cell,
@@ -300,26 +301,29 @@ def test_pocket_preserves_concave_outline_detail():
 
 
 @pytest.mark.parametrize("depth", [True, False, None, "5", 1j, float("nan"), float("inf"), -float("inf"), 0, -1, 23.001])
-def test_invalid_pocket_depth(pocket_placement, depth):
+@pytest.mark.parametrize("factory", [chappel_insert_with_pocket, lambda p, *a: chappel_insert_with_pockets([p], *a)])
+def test_invalid_pocket_depth(pocket_placement, depth, factory):
     with pytest.raises(ValueError, match="depth must"):
-        chappel_insert_with_pocket(pocket_placement, 2, 3, depth)
+        factory(pocket_placement, 2, 3, depth)
 
 
 @pytest.mark.parametrize("clearance", [True, False, None, "1", 1j, float("nan"), float("inf"), -float("inf"), -0.001])
-def test_invalid_pocket_clearance(pocket_placement, clearance):
+@pytest.mark.parametrize("factory", [chappel_insert_with_pocket, lambda p, *a: chappel_insert_with_pockets([p], *a)])
+def test_invalid_pocket_clearance(pocket_placement, clearance, factory):
     with pytest.raises(ValueError, match="clearance must"):
-        chappel_insert_with_pocket(pocket_placement, 2, 3, 5, clearance)
+        factory(pocket_placement, 2, 3, 5, clearance)
 
 
 @pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1, "1", None])
 @pytest.mark.parametrize("axis", [0, 1])
-def test_pocket_cell_validation(pocket_placement, invalid, axis):
+@pytest.mark.parametrize("factory", [chappel_insert_with_pocket, lambda p, *a: chappel_insert_with_pockets([p], *a)])
+def test_pocket_cell_validation(pocket_placement, invalid, axis, factory):
     cells = [2, 3]
     cells[axis] = invalid
     with pytest.raises(ValueError) as expected:
         CHAPPEL.organizer_footprint_xy(*cells)
     with pytest.raises(ValueError) as actual:
-        chappel_insert_with_pocket(pocket_placement, *cells, 5)
+        factory(pocket_placement, *cells, 5)
     assert actual.value.args == expected.value.args
 
 
@@ -331,3 +335,88 @@ def test_pocket_calls_are_independent_and_preserve_input(pocket_placement):
     first.move(Location((7, 8, 9)))
     assert tuple(second.bounding_box().min) == pytest.approx((0, 0, 0), abs=5e-7)
     assert (pocket_placement.outline.points, pocket_placement.points, pocket_placement.bounds) == original
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("clearance", [0, 1])
+def test_composed_pockets(pocket_placement, count, container, clearance):
+    placements = container([
+        pocket_placement,
+        PlacedOutline(pocket_placement.outline, x=80, y=60, quarter_turns=1),
+        PlacedOutline(pocket_placement.outline, x=50, y=110, quarter_turns=3),
+    ][:count])
+    original = tuple((p, p.points, p.bounds) for p in placements)
+    blank = chappel_insert_blank(2, 3)
+    result = chappel_insert_with_pockets(placements, 2, 3, 23, clearance)
+    reverse = chappel_insert_with_pockets(tuple(reversed(placements)), 2, 3, 23, clearance)
+    assert isinstance(result.wrapped, TopoDS_Solid)
+    assert len(result.solids()) == 1
+    assert BRepCheck_Analyzer(result.wrapped).IsValid()
+    assert BRepCheck_Analyzer(reverse.wrapped).IsValid()
+    for attr in ("min", "max"):
+        assert tuple(getattr(result.bounding_box(), attr)) == pytest.approx(
+            tuple(getattr(blank.bounding_box(), attr)), abs=5e-7,
+        )
+    assert blank.volume - result.volume == pytest.approx(
+        count * (20 + 2 * clearance) * (10 + 2 * clearance) * 23, abs=1e-6,
+    )
+    assert reverse.volume == pytest.approx(result.volume, abs=1e-6)
+    assert result.cut(reverse).volume == pytest.approx(0, abs=1e-7)
+    assert reverse.cut(result).volume == pytest.approx(0, abs=1e-7)
+    for placement in placements:
+        single = chappel_insert_with_pocket(placement, 2, 3, 23, clearance)
+        min_x, min_y, max_x, max_y = placement.bounds
+        x, y = (min_x + max_x) / 2, (min_y + max_y) / 2
+        assert not result.is_inside((x, y, 2.001))
+        assert not result.is_inside((x, y, 24.999))
+        assert result.is_inside((x, y, 1.999))
+        assert result.is_inside((min_x - clearance - 0.01, y, 24))
+        if count == 1:
+            assert single.volume == pytest.approx(result.volume, abs=1e-6)
+            assert single.cut(result).volume == pytest.approx(0, abs=1e-7)
+            assert result.cut(single).volume == pytest.approx(0, abs=1e-7)
+    assert tuple((p, p.points, p.bounds) for p in placements) == original
+
+
+@pytest.mark.parametrize("offset, clearance, message", [
+    (19, 0, "^Pocket placements"), (20, 0, "^Pocket placements"),
+    (21, 1, "^Clearance-expanded pockets"), (22, 1, "^Clearance-expanded pockets"),
+])
+def test_composed_collision(pocket_placement, offset, clearance, message):
+    other = PlacedOutline(pocket_placement.outline, x=30 + offset, y=40)
+    with pytest.raises(ValueError, match=message):
+        chappel_insert_with_pockets([pocket_placement, other], 2, 3, 5, clearance)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_composed_deep_breach(pocket_placement, reverse):
+    edge = PlacedOutline(pocket_placement.outline, x=1, y=80)
+    placements = [pocket_placement, edge]
+    if reverse:
+        placements.reverse()
+    assert chappel_insert_with_pockets(placements, 2, 3, 12).is_valid
+    with pytest.raises(ValueError, match="^Pocket is not fully contained within the Chappel insert$"):
+        chappel_insert_with_pockets(placements, 2, 3, 20)
+
+
+@pytest.mark.parametrize("placements", [[], ()])
+def test_composed_empty(placements):
+    with pytest.raises(ValueError, match="^At least one pocket placement is required$"):
+        chappel_insert_with_pockets(placements, 2, 3, 5)
+
+
+def test_composition_buffers_each_global_ring_once(pocket_placement, monkeypatch):
+    placements = [pocket_placement, PlacedOutline(
+        pocket_placement.outline, x=80, y=60, quarter_turns=1,
+    )]
+    calls = []
+    original = PolygonScaler.add_clearance
+
+    def record(self, polygon, clearance):
+        calls.append((tuple(polygon.points_mm), clearance))
+        return original(self, polygon, clearance)
+
+    monkeypatch.setattr(PolygonScaler, "add_clearance", record)
+    chappel_insert_with_pockets(placements, 2, 3, 5, 1)
+    assert calls == [(p.points, 1) for p in placements]
