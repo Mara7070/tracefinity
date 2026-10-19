@@ -49,7 +49,10 @@ async function openExport() {
   await screen.findByText('Workshop')
   expect((screen.getByRole('button', { name: 'Export Chappel' }) as HTMLButtonElement).disabled).toBe(true)
   expect((screen.getByRole('button', { name: 'Create bin' }) as HTMLButtonElement).disabled).toBe(true)
-  fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+  const projectSelectAll = screen.getAllByRole('button', { name: 'Select all' })
+    .find(button => !(button as HTMLButtonElement).disabled)
+  expect(projectSelectAll).toBeDefined()
+  fireEvent.click(projectSelectAll!)
   fireEvent.click(screen.getByRole('button', { name: 'Export Chappel (2)' }))
 }
 
