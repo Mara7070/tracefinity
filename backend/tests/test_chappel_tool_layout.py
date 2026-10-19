@@ -7,6 +7,7 @@ import pytest
 from app.models.schemas import FingerHole, Point, Tool
 from app.services import chappel_tool_layout
 from app.services.chappel_dimensions import CHAPPEL
+from app.services.chappel_tool_layout import edge_anchor_tool_candidates as edge_candidates
 from app.services.chappel_tool_layout import (
     first_minimal_chappel_organizer_fit as first_minimal,
 )
@@ -81,6 +82,58 @@ def test_exact_organizer_clearance():
 
 def rectangle_tool(width, height):
     return make_tool([(0, 0), (width, 0), (width, height), (0, height)])
+
+
+@pytest.mark.parametrize("cells", [(1, 1), (2, 1), (1, 2), (2, 3)])
+@pytest.mark.parametrize("inset", [0, 0.5, 28])
+def test_edge_empty_matches_single_fit(tool, cells, inset):
+    assert edge_candidates(tool, *cells, [], inset, 1) == fit(tool, *cells, inset)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_edge_rectangle_spacing_dedup_and_immutability(container):
+    tool = rectangle_tool(10, 5)
+    occupied = container([placement([(0, 0), (10, 0), (10, 5), (0, 5)])] * 2)
+    before = deepcopy((tool.model_dump(), occupied))
+    result = edge_candidates(tool, 1, 1, occupied, gap=1)
+    assert [(p.quarter_turns, p.bounds[:2]) for p in result] == [
+        (turn, anchor) for turn in (0, 1) for anchor in ((11, 0), (0, 6), (11, 6))
+    ]
+    assert len({p.points for p in result}) == len(result)
+    assert edge_candidates(tool, 1, 1, occupied) == ()
+    assert (tool.model_dump(), occupied) == before
+
+
+def test_edge_offset_outline_and_container_overflow():
+    tool = make_tool([(-12, 8), (-2, 8), (-2, 13), (-12, 13)])
+    occupied = [placement([(0, 0), (45, 0), (45, 45), (0, 45)])]
+    result = edge_candidates(tool, 1, 1, occupied, inset=2, gap=1)
+    assert [(p.quarter_turns, p.bounds) for p in result] == [
+        (0, (2, 46, 12, 51)), (1, (46, 2, 51, 12))
+    ]
+
+
+def test_edge_asymmetric_orientation_and_position_order(tool):
+    # A small offset triangle keeps all four rotations distinct.
+    tool = make_tool([(-2, 3), (4, 3), (-2, 7)])
+    occupied = [placement([(0, 0), (10, 0), (10, 10), (0, 10)])]
+    result = edge_candidates(tool, 1, 1, occupied, inset=2, gap=1)
+    assert [(p.quarter_turns, p.bounds[:2]) for p in result] == [
+        (turn, anchor) for turn in range(4) for anchor in ((11, 2), (2, 11), (11, 11))
+    ]
+
+
+def test_edge_occupied_anchor_equal_to_inset_is_deduped():
+    occupied = [placement([(-2, -2), (0, -2), (0, 0), (-2, 0)])]
+    tool = rectangle_tool(5, 5)
+    assert edge_candidates(tool, 1, 1, occupied, inset=1, gap=1) == fit(tool, 1, 1, 1)
+
+
+@pytest.mark.parametrize("gap", [True, False, -1, float("nan"), float("inf"),
+                                 -float("inf"), "1", None, 1j])
+def test_edge_invalid_gap(gap):
+    with pytest.raises(ValueError, match="Gap must be a finite non-negative real"):
+        edge_candidates(rectangle_tool(5, 5), 1, 1, [], gap=gap)
 
 
 def test_minimal_one_cell_excludes_larger_fitting_envelopes():
@@ -260,7 +313,8 @@ def test_collision_filtering_and_first(container, x, y, w, h, turns):
 ADAPTERS = [lambda tool, x, y, inset=0: fit(tool, x, y, inset),
             lambda tool, x, y, inset=0: minimal(tool, x, y, inset),
             lambda tool, x, y, inset=0: nonconflicting(tool, x, y, [], inset),
-            lambda tool, x, y, inset=0: first(tool, x, y, [], inset)]
+            lambda tool, x, y, inset=0: first(tool, x, y, [], inset),
+            lambda tool, x, y, inset=0: edge_candidates(tool, x, y, [], inset)]
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS[:1] + ADAPTERS[2:])
