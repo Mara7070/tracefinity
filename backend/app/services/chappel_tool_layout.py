@@ -42,6 +42,20 @@ def minimal_chappel_organizer_sizes(
     return tuple(sizes)
 
 
+def first_minimal_chappel_organizer_fit(
+    tool: Tool, max_cells_x: int, max_cells_y: int, inset: float = 0.0
+) -> tuple[int, int, PlacedOutline] | None:
+    """Select the lexicographically first minimum envelope, then its first fit."""
+    sizes = minimal_chappel_organizer_sizes(tool, max_cells_x, max_cells_y, inset)
+    if not sizes:
+        return None
+    cells_x, cells_y = min(sizes)
+    candidates = fit_tool_in_chappel_organizer(tool, cells_x, cells_y, inset)
+    if not candidates:
+        raise RuntimeError("Selected minimum Chappel envelope yielded no fit candidate")
+    return cells_x, cells_y, candidates[0]
+
+
 def nonconflicting_tool_in_chappel_organizer(
     tool: Tool,
     cells_x: int,
