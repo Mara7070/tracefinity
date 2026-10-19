@@ -12,6 +12,7 @@ from app.services.chappel_dimensions import CHAPPEL
 from app.services.chappel_export import export_chappel_step, export_chappel_stl
 from app.services.chappel_tool_layout import (
     first_minimal_chappel_organizer_fit,
+    minimal_chappel_organizer_sizes_for_tools,
     place_tools_in_chappel_organizer,
 )
 from app.services.object_geometry import PlacedOutline
@@ -74,6 +75,16 @@ def export_minimal_chappel_tool(
     clearance: float = 0.0,
 ) -> Path:
     """Select an envelope reserving a conservative physical margin at all depths."""
+    effective_inset = _physical_safe_inset(inset, clearance)
+    selected = first_minimal_chappel_organizer_fit(tool, max_cells_x, max_cells_y, effective_inset)
+    if selected is None:
+        raise ValueError("tool does not fit within the supplied Chappel cell bounds")
+    cells_x, cells_y, placement = selected
+    return export_chappel_insert((placement,), cells_x, cells_y, depth, output_path, clearance)
+
+
+def _physical_safe_inset(inset: float, clearance: float) -> float:
+    """Validate automatic-export margins and reserve recovered physical geometry."""
     if (isinstance(inset, bool) or not isinstance(inset, Real)
             or not isfinite(inset) or inset < 0):
         raise ValueError("Inset must be finite and non-negative")
@@ -87,9 +98,33 @@ def export_minimal_chappel_tool(
         CHAPPEL.insert_mid_inset / 2 + CHAPPEL.insert_mid_corner_radius,
         CHAPPEL.insert_top_corner_radius,
     )
-    effective_inset = max(inset, physical_inset + clearance)
-    selected = first_minimal_chappel_organizer_fit(tool, max_cells_x, max_cells_y, effective_inset)
-    if selected is None:
-        raise ValueError("tool does not fit within the supplied Chappel cell bounds")
-    cells_x, cells_y, placement = selected
-    return export_chappel_insert((placement,), cells_x, cells_y, depth, output_path, clearance)
+    return max(inset, physical_inset + clearance)
+
+
+def export_minimal_chappel_tools(
+    tools: Sequence[Tool],
+    max_cells_x: int,
+    max_cells_y: int,
+    gap: float,
+    depth: float,
+    output_path: str | os.PathLike[str],
+    inset: float = 0.0,
+    clearance: float = 0.0,
+) -> Path:
+    """Export the lexicographically first minimum-area ordered greedy layout.
+
+    Reserve the single-Tool physical margin plus clearance during sizing and
+    placement; CAD independently expands pockets by clearance. Delegate errors
+    propagate unchanged, with explicit errors for no fit or inconsistent sizing.
+    """
+    effective_inset = _physical_safe_inset(inset, clearance)
+    sizes = minimal_chappel_organizer_sizes_for_tools(
+        tools, max_cells_x, max_cells_y, gap, effective_inset,
+    )
+    if not sizes:
+        raise ValueError("ordered Tool set does not fit within the supplied Chappel cell bounds")
+    cells_x, cells_y = min(sizes)
+    placements = place_tools_in_chappel_organizer(tools, cells_x, cells_y, gap, effective_inset)
+    if placements is None:
+        raise RuntimeError("Selected minimum Chappel envelope yielded no greedy placement")
+    return export_chappel_insert(placements, cells_x, cells_y, depth, output_path, clearance)
