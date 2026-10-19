@@ -75,3 +75,23 @@ def test_dataclass_is_frozen():
                 setattr(dimensions, field.name, getattr(dimensions, field.name))
         with pytest.raises(FrozenInstanceError):
             del dimensions.pitch
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("grid_height", 4.0),
+    ("foot_bottom_size", 45.4909),
+    ("foot_chamfer", 2.9698),
+    ("foot_floor_thickness", 1.45),
+    ("foot_inner_at_floor", 44.2897),
+    ("foot_inner_chamfer", 1.9445),
+    ("foot_transition_z", 3.75),
+    ("foot_outer_at_transition", 52.9905),
+    ("foot_outer_at_grid_top", 53.3511),
+    ("v2_foot_size_delta", 0.6258),
+])
+def test_recovered_foot_constants(name, expected):
+    for dimensions in (CHAPPEL, ChappelDimensions()):
+        assert getattr(dimensions, name) == expected
+        assert type(getattr(dimensions, name)) is float
+        with pytest.raises(FrozenInstanceError):
+            setattr(dimensions, name, 0)
