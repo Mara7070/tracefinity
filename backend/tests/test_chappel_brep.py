@@ -8,6 +8,7 @@ from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
 from OCP.TopoDS import TopoDS_Solid
 
 from app.services.chappel_brep import (
+    chappel_adapter_blank,
     chappel_insert_blank,
     chappel_insert_with_pocket,
     chappel_insert_with_pockets,
@@ -57,7 +58,7 @@ def test_asymmetric_axes():
     )
 
 
-@pytest.mark.parametrize("factory", [chappel_organizer_blank, chappel_insert_blank])
+@pytest.mark.parametrize("factory", [chappel_organizer_blank, chappel_insert_blank, chappel_adapter_blank])
 def test_repeated_calls_are_independent(factory):
     first = factory(2, 3)
     second = factory(2, 3)
@@ -72,7 +73,7 @@ def test_repeated_calls_are_independent(factory):
 
 @pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0.0, 0, -1, -4, "1", None])
 @pytest.mark.parametrize("axis", [0, 1])
-@pytest.mark.parametrize("factory", [chappel_organizer_blank, chappel_insert_blank])
+@pytest.mark.parametrize("factory", [chappel_organizer_blank, chappel_insert_blank, chappel_adapter_blank])
 def test_cell_validation_propagates(invalid, axis, factory):
     cells = [2, 3]
     cells[axis] = invalid
@@ -82,6 +83,77 @@ def test_cell_validation_propagates(invalid, axis, factory):
         factory(*cells)
     assert type(blank_error.value) is type(dimensions_error.value)
     assert blank_error.value.args == dimensions_error.value.args
+
+
+@pytest.mark.parametrize("nx, ny", [(1, 1), (2, 1), (2, 3)])
+@pytest.mark.parametrize("thickness", [None, 0.75, 3])
+def test_native_adapter_blank(nx, ny, thickness):
+    blank = (chappel_adapter_blank(nx, ny) if thickness is None
+             else chappel_adapter_blank(nx, ny, thickness))
+    thickness = 1.5 if thickness is None else thickness
+    width, depth = CHAPPEL.bin_footprint_xy(nx, ny)
+    assert isinstance(blank, Solid)
+    assert isinstance(blank.wrapped, TopoDS_Solid)
+    assert len(blank.solids()) == 1
+    assert blank.is_valid
+    assert BRepCheck_Analyzer(blank.wrapped).IsValid()
+    assert tuple(blank.bounding_box().min) == pytest.approx((0, 0, 0), rel=0, abs=5e-7)
+    assert tuple(blank.bounding_box().max) == pytest.approx(
+        (width, depth, 4 + thickness), rel=0, abs=5e-7,
+    )
+    # Actual horizontal sections prove the deck covers the ordinary footprint,
+    # including the overhang at Z=4, with no interior holes above the feet.
+    assert (width, depth) == pytest.approx((55 * nx - 0.2, 55 * ny - 0.2))
+    for z in (4, 4 + thickness / 2, 4 + thickness):
+        operation = BRepAlgoAPI_Section(
+            blank.wrapped, gp_Pln(gp_Pnt(0, 0, z), gp_Dir(0, 0, 1)), False,
+        )
+        operation.Build()
+        assert operation.IsDone()
+        section = Compound(operation.Shape())
+        assert tuple(section.bounding_box().min) == pytest.approx((0, 0, z), rel=0, abs=5e-7)
+        assert tuple(section.bounding_box().max) == pytest.approx((width, depth, z), rel=0, abs=5e-7)
+        if z > 4:
+            assert len(section.edges()) == 4
+    assert not blank.is_inside((0.1, 0.1, 3.999))
+    assert blank.is_inside((0.1, 0.1, 4.001))
+
+    # A slab below the foot cavity floor must contain one disconnected foot
+    # per cell; centres, bounds and empty inter-cell gaps come from topology.
+    slab = Solid.make_box(width, depth, 0.5).moved(Location((0, 0, 0.5)))
+    lower = blank.intersect(slab)
+    assert len(lower.solids()) == nx * ny
+    centers = sorted(tuple(s.bounding_box().center()) for s in lower.solids())
+    expected = sorted((27.3 + 55 * x, 27.3 + 55 * y, 0.75)
+                      for x in range(nx) for y in range(ny))
+    for actual, wanted in zip(centers, expected, strict=True):
+        assert actual == pytest.approx(wanted, rel=0, abs=5e-7)
+    bounds = Compound(lower.solids()).bounding_box()
+    assert bounds.min.X > 0 and bounds.min.Y > 0
+    assert bounds.max.X < width and bounds.max.Y < depth
+    for x in range(nx):
+        for y in range(ny):
+            cx, cy = 27.3 + 55 * x, 27.3 + 55 * y
+            assert blank.is_inside((cx, cy, 1))
+            assert not blank.is_inside((cx, cy, 3.999))
+            assert blank.is_inside((cx + 26, cy, 3.999))
+            assert blank.is_inside((cx, cy, 4.001))
+            if x + 1 < nx:
+                assert not blank.is_inside((cx + 27.5, cy, 1))
+            if y + 1 < ny:
+                assert not blank.is_inside((cx, cy + 27.5, 1))
+    assert blank.volume == pytest.approx(
+        chappel_v2_foot_array(nx, ny).volume + width * depth * thickness,
+        rel=0, abs=1e-6,
+    )
+
+
+@pytest.mark.parametrize("thickness", [
+    True, False, 0, -1, float("nan"), float("inf"), -float("inf"), "1.5", None, 1j,
+])
+def test_adapter_invalid_deck_thickness(thickness):
+    with pytest.raises(ValueError, match="^deck_thickness must be a finite positive real number$"):
+        chappel_adapter_blank(1, 1, thickness)
 
 
 def test_native_v2_foot_cell():

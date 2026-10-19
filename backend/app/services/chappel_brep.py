@@ -192,3 +192,27 @@ def chappel_v2_foot_array(cells_x: int, cells_y: int) -> Compound | Solid:
         for ix in range(cells_x)
         for iy in range(cells_y)
     ])
+
+
+def chappel_adapter_blank(
+    cells_x: int, cells_y: int, deck_thickness: float = 1.5,
+) -> Solid:
+    """Join preferred v2/40 feet to the recovered ordinary-footprint deck.
+
+    Follows Mara7070/cad-apprenticeship/interfaces/chappel.py::chappel_adapter_blank:
+    feet occupy Z=0..4 mm and the common deck starts at grid_height. The deck
+    uses the bin footprint at XY=(0, 0), not the 25-series insert envelope.
+    Cell validation belongs to CHAPPEL and propagates unchanged.
+    """
+    width, depth = CHAPPEL.bin_footprint_xy(cells_x, cells_y)
+    if (isinstance(deck_thickness, bool) or not isinstance(deck_thickness, Real)
+            or not isfinite(deck_thickness) or deck_thickness <= 0):
+        raise ValueError("deck_thickness must be a finite positive real number")
+    feet = chappel_v2_foot_array(cells_x, cells_y)
+    deck = Solid.make_box(width, depth, deck_thickness).moved(
+        Location((0, 0, CHAPPEL.grid_height)),
+    )
+    result = deck.fuse(*feet.solids())
+    if not isinstance(result, Solid) or len(result.solids()) != 1 or not result.is_valid:
+        raise ValueError("Chappel adapter blank must be one valid solid")
+    return result
