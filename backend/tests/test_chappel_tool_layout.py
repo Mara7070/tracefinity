@@ -4,9 +4,12 @@ from copy import deepcopy
 
 import pytest
 
-from app.services import chappel_tool_layout
 from app.models.schemas import FingerHole, Point, Tool
+from app.services import chappel_tool_layout
 from app.services.chappel_dimensions import CHAPPEL
+from app.services.chappel_tool_layout import (
+    first_minimal_chappel_organizer_fit as first_minimal,
+)
 from app.services.chappel_tool_layout import (
     first_nonconflicting_tool_in_chappel_organizer as first,
 )
@@ -119,6 +122,88 @@ def test_minimal_positive_inset_increases_envelope():
     assert minimal(tool, 3, 3, 0.5) == ((1, 2), (2, 1))
 
 
+@pytest.mark.parametrize("width,height,bounds,envelope,turn", [
+    (20, 10, (4, 3), (1, 1), 0),
+    (60, 20, (3, 3), (1, 2), 1),
+    (120, 20, (4, 1), (3, 1), 0),
+])
+def test_first_minimal_envelope_and_fit_order(width, height, bounds, envelope, turn):
+    tool = rectangle_tool(width, height)
+    before = deepcopy(tool.model_dump())
+    candidates = fit(tool, *envelope, 0.5)
+    result = first_minimal(tool, *bounds, 0.5)
+    assert result == (*envelope, candidates[0])
+    assert result[2].quarter_turns == turn
+    assert tool.model_dump() == before
+
+
+def test_first_minimal_no_fitting_envelope():
+    assert first_minimal(rectangle_tool(120, 20), 2, 2) is None
+
+
+@pytest.mark.parametrize("sizes", [(), ((1, 2), (2, 1)), ((2, 1), (1, 2))])
+@pytest.mark.parametrize("empty_fit", [False, True])
+def test_first_minimal_exact_delegation(monkeypatch, sizes, empty_fit):
+    tool = make_tool([])  # Validation belongs exclusively to the delegates.
+    inset = 0.75
+    calls = []
+    candidates = (placement([(0, 0), (6, 0), (0, 4)]),
+                  placement([(0, 0), (3, 0), (0, 2)]))
+    before = deepcopy(candidates)
+
+    def fake_minimal(actual_tool, max_x, max_y, actual_inset):
+        assert actual_tool is tool
+        assert actual_inset is inset
+        calls.append(("minimal", max_x, max_y))
+        return sizes
+
+    def fake_fit(actual_tool, cells_x, cells_y, actual_inset):
+        assert actual_tool is tool
+        assert actual_inset is inset
+        calls.append(("fit", cells_x, cells_y))
+        return () if empty_fit else candidates
+
+    monkeypatch.setattr(chappel_tool_layout, "minimal_chappel_organizer_sizes", fake_minimal)
+    monkeypatch.setattr(chappel_tool_layout, "fit_tool_in_chappel_organizer", fake_fit)
+    if sizes and empty_fit:
+        with pytest.raises(RuntimeError, match="minimum Chappel envelope"):
+            first_minimal(tool, 3, 4, inset)
+    else:
+        result = first_minimal(tool, 3, 4, inset)
+        if sizes:
+            assert result[:2] == (1, 2)
+            assert result[2] is candidates[0]
+        else:
+            assert result is None
+    assert calls == [("minimal", 3, 4)] + ([("fit", 1, 2)] if sizes else [])
+    assert candidates == before
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1])
+def test_first_minimal_bound_validation_unchanged(tool, axis, invalid):
+    bounds = [2, 3]
+    bounds[axis] = invalid
+    with pytest.raises(ValueError) as expected:
+        minimal(tool, *bounds)
+    with pytest.raises(type(expected.value), match=str(expected.value)):
+        first_minimal(tool, *bounds)
+
+
+@pytest.mark.parametrize("delegate", ["minimal_chappel_organizer_sizes", "fit_tool_in_chappel_organizer"])
+def test_first_minimal_propagates_delegate_exception(monkeypatch, tool, delegate):
+    error = ValueError("delegated validation failure")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(chappel_tool_layout, "minimal_chappel_organizer_sizes", lambda *args: ((1, 1),))
+    monkeypatch.setattr(chappel_tool_layout, delegate, fail)
+    with pytest.raises(ValueError) as raised:
+        first_minimal(tool, 2, 3)
+    assert raised.value is error
+
+
 @pytest.mark.parametrize("qualifiers,expected", [
     (set(), ()),
     ({(1, 1), (2, 3)}, ((1, 1),)),
@@ -190,7 +275,7 @@ def test_cell_validation_unchanged(tool, adapter, axis, invalid):
         adapter(tool, *cells)
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
+@pytest.mark.parametrize("adapter", ADAPTERS + [first_minimal])
 @pytest.mark.parametrize("inset", [-1, float("nan"), float("inf"), -float("inf")])
 def test_inset_validation_unchanged(tool, adapter, inset):
     with pytest.raises(ValueError) as expected:
@@ -199,7 +284,7 @@ def test_inset_validation_unchanged(tool, adapter, inset):
         adapter(tool, 2, 3, inset)
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
+@pytest.mark.parametrize("adapter", ADAPTERS + [first_minimal])
 @pytest.mark.parametrize("coordinates", [[], [(0, 0), (1, 1)], [(0, 0), (1, 1), (2, 2)]])
 def test_invalid_outer_ring_unchanged(adapter, coordinates):
     tool = make_tool(coordinates)
@@ -229,7 +314,7 @@ def test_invalid_polygon_unchanged(tool, adapter, invalid_tool):
 def test_ignored_fields_and_input_immutability(tool, container):
     occupied = container([placement([(0, 0), (1, 0), (0, 1)], 100, 100)])
     expected = (fit(tool, 2, 3), nonconflicting(tool, 2, 3, occupied), first(tool, 2, 3, occupied),
-                minimal(tool, 2, 3, 0.5))
+                minimal(tool, 2, 3, 0.5), first_minimal(tool, 2, 3, 0.5))
     tool.interior_rings = [[Point(x=0, y=0)]]
     tool.finger_holes = [FingerHole(id="hole", x=0, y=0, radius=100)]
     tool.source_image_transform = [2, 0, 0, 2, 100, 200]
@@ -240,7 +325,7 @@ def test_ignored_fields_and_input_immutability(tool, container):
     before = deepcopy((tool.model_dump(), occupied))
     points_list, points, placements = tool.points, tuple(tool.points), tuple(occupied)
     assert (fit(tool, 2, 3), nonconflicting(tool, 2, 3, occupied), first(tool, 2, 3, occupied),
-            minimal(tool, 2, 3, 0.5)) == expected
+            minimal(tool, 2, 3, 0.5), first_minimal(tool, 2, 3, 0.5)) == expected
     assert (tool.model_dump(), occupied) == before
     assert tool.points is points_list
     assert all(a is b for a, b in zip(tool.points, points))
