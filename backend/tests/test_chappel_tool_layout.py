@@ -10,6 +10,7 @@ from app.services.chappel_tool_layout import (
     first_nonconflicting_tool_in_chappel_organizer as first,
 )
 from app.services.chappel_tool_layout import fit_tool_in_chappel_organizer as fit
+from app.services.chappel_tool_layout import minimal_chappel_organizer_sizes as minimal
 from app.services.chappel_tool_layout import (
     nonconflicting_tool_in_chappel_organizer as nonconflicting,
 )
@@ -90,6 +91,7 @@ def test_collision_filtering_and_first(container, x, y, w, h, turns):
 
 
 ADAPTERS = [lambda tool, x, y, inset=0: fit(tool, x, y, inset),
+            lambda tool, x, y, inset=0: minimal(tool, x, y, inset),
             lambda tool, x, y, inset=0: nonconflicting(tool, x, y, [], inset),
             lambda tool, x, y, inset=0: first(tool, x, y, [], inset)]
 

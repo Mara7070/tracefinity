@@ -19,6 +19,29 @@ def fit_tool_in_chappel_organizer(
     return fit_tool_candidates(tool, width, height, inset)
 
 
+def minimal_chappel_organizer_sizes(
+    tool: Tool, max_cells_x: int, max_cells_y: int, inset: float = 0.0
+) -> tuple[tuple[int, int], ...]:
+    """Return every bounded fitting envelope with minimum cell area, in XY order."""
+    for bound in (max_cells_x, max_cells_y):
+        if type(bound) is not int or bound < 1:
+            raise ValueError("cell bounds must be Python ints >= 1")
+
+    minimum_area = None
+    sizes = []
+    for cells_x in range(1, max_cells_x + 1):
+        for cells_y in range(1, max_cells_y + 1):
+            if not fit_tool_in_chappel_organizer(tool, cells_x, cells_y, inset):
+                continue
+            area = cells_x * cells_y
+            if minimum_area is None or area < minimum_area:
+                minimum_area = area
+                sizes = [(cells_x, cells_y)]
+            elif area == minimum_area:
+                sizes.append((cells_x, cells_y))
+    return tuple(sizes)
+
+
 def nonconflicting_tool_in_chappel_organizer(
     tool: Tool,
     cells_x: int,
