@@ -463,3 +463,151 @@ def test_minimal_invalid_margin_before_selection(monkeypatch, tmp_path, rectangu
         )
     selector.assert_not_called()
     exporter.assert_not_called()
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("inset,clearance,effective", [(0, 0, 4), (0, 0.25, 4.25), (5, 0.25, 5)])
+@pytest.mark.parametrize("string_path", [False, True])
+def test_minimal_tools_delegation(monkeypatch, tmp_path, ordered_tools, placements,
+                                  container, inset, clearance, effective, string_path):
+    tools = container(ordered_tools)
+    before = deepcopy(tools)
+    originals = tuple(tools)
+    sizes = Mock(return_value=((3, 1), (1, 3)))
+    placer = Mock(return_value=placements)
+    result = Path("returned")
+    exporter = Mock(return_value=result)
+    monkeypatch.setattr(chappel_pipeline, "minimal_chappel_organizer_sizes_for_tools", sizes)
+    monkeypatch.setattr(chappel_pipeline, "place_tools_in_chappel_organizer", placer)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    destination = tmp_path / "minimal.step"
+    if string_path:
+        destination = str(destination)
+    assert chappel_pipeline.export_minimal_chappel_tools(
+        tools, 4, 5, 1.5, 23, destination, inset, clearance,
+    ) is result
+    sizes.assert_called_once_with(tools, 4, 5, 1.5, effective)
+    placer.assert_called_once_with(tools, 1, 3, 1.5, effective)
+    assert sizes.call_args.args[0] is tools and placer.call_args.args[0] is tools
+    exporter.assert_called_once_with(placements, 1, 3, 23, destination, clearance)
+    assert exporter.call_args.args[0] is placements
+    assert exporter.call_args.args[4] is destination
+    assert tools == before
+    assert all(a is b for a, b in zip(tools, originals, strict=True))
+
+
+@pytest.mark.parametrize("inconsistent", [False, True])
+def test_minimal_tools_no_layout(monkeypatch, tmp_path, ordered_tools, inconsistent):
+    sizes = Mock(return_value=((1, 2),) if inconsistent else ())
+    placer = Mock(return_value=None)
+    exporter = Mock()
+    builder = Mock()
+    monkeypatch.setattr(chappel_pipeline, "minimal_chappel_organizer_sizes_for_tools", sizes)
+    monkeypatch.setattr(chappel_pipeline, "place_tools_in_chappel_organizer", placer)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    monkeypatch.setattr(chappel_pipeline, "chappel_insert_with_pockets", builder)
+    message = ("Selected minimum Chappel envelope yielded no greedy placement" if inconsistent else
+               "ordered Tool set does not fit within the supplied Chappel cell bounds")
+    with pytest.raises(RuntimeError if inconsistent else ValueError, match=f"^{message}$"):
+        chappel_pipeline.export_minimal_chappel_tools(ordered_tools, 2, 2, 2, 12, tmp_path / "no.step")
+    assert placer.call_count == int(inconsistent)
+    exporter.assert_not_called()
+    builder.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("field", ["inset", "clearance"])
+@pytest.mark.parametrize("value", [True, False, -1, float("nan"), float("inf"),
+                                  -float("inf"), "0", None, 1j])
+def test_minimal_tools_invalid_margin(monkeypatch, tmp_path, ordered_tools, field, value):
+    sizes = Mock()
+    monkeypatch.setattr(chappel_pipeline, "minimal_chappel_organizer_sizes_for_tools", sizes)
+    with pytest.raises(ValueError) as single:
+        chappel_pipeline.export_minimal_chappel_tool(
+            ordered_tools[0], 3, 3, 12, tmp_path / "single.step", **{field: value},
+        )
+    with pytest.raises(ValueError) as multiple:
+        chappel_pipeline.export_minimal_chappel_tools(
+            ordered_tools, 3, 3, 2, 12, tmp_path / "multi.step", **{field: value},
+        )
+    assert multiple.value.args == single.value.args
+    sizes.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["gap", "tool", "empty", "bounds", "no_fit"])
+def test_minimal_tools_real_errors(monkeypatch, tmp_path, ordered_tools, case):
+    tools, gap, bound = ordered_tools, 2, 2
+    if case == "gap":
+        gap = -1
+    elif case == "tool":
+        tools = [ordered_tools[0].model_copy(update={"points": []})]
+    elif case == "empty":
+        tools = []
+    elif case == "bounds":
+        bound = 0
+    else:
+        tools = [ordered_tools[0].model_copy(update={"points": [
+            Point(x=x, y=y) for x, y in ((0, 0), (500, 0), (500, 500), (0, 500))
+        ]})]
+    exporter = Mock()
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    if case != "no_fit":
+        with pytest.raises(ValueError) as direct:
+            chappel_pipeline.minimal_chappel_organizer_sizes_for_tools(tools, bound, bound, gap, 4)
+    with pytest.raises(ValueError) as caught:
+        chappel_pipeline.export_minimal_chappel_tools(tools, bound, bound, gap, 12, tmp_path / "bad.step")
+    if case != "no_fit":
+        assert caught.value.args == direct.value.args
+    else:
+        assert str(caught.value) == "ordered Tool set does not fit within the supplied Chappel cell bounds"
+    exporter.assert_not_called()
+
+
+@pytest.mark.parametrize("suffix", [".step", ".stl"])
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("clearance", [0, 0.25])
+def test_minimal_tools_real_artifact(tmp_path, suffix, count, clearance):
+    tools = [Tool(id=str(i), name=str(i), points=[
+        Point(x=x, y=y) for x, y in ((0, 0), (60, 0), (60, 10), (0, 10))
+    ]) for i in range(count)]
+    before, originals = deepcopy(tools), tuple(tools)
+    effective = 4 + clearance
+    sizes = chappel_pipeline.minimal_chappel_organizer_sizes_for_tools(tools, 3, 3, 2, effective)
+    assert sizes == ((1, 2), (2, 1))
+    placements = chappel_pipeline.place_tools_in_chappel_organizer(tools, 1, 2, 2, effective)
+    assert placements is not None
+    assert placements[0].bounds[:2] == (effective, effective)
+    blank = chappel_insert_blank(1, 2)
+    expected = blank.volume - count * (60 + 2 * clearance) * (10 + 2 * clearance) * 23
+    destination = tmp_path / ("automatic" + suffix)
+    assert chappel_pipeline.export_minimal_chappel_tools(
+        tools, 3, 3, 2, 23, destination, clearance=clearance,
+    ) == destination
+    if suffix == ".step":
+        imported = import_step(destination)
+        assert BRepCheck_Analyzer(imported.wrapped).IsValid()
+        assert len(imported.solids()) == 1
+        solid = imported.solids()[0]
+        assert solid.is_valid
+        assert solid.volume == pytest.approx(expected, rel=1e-9)
+        for placement in placements:
+            left, bottom, right, top = placement.bounds
+            center = ((left + right) / 2, (bottom + top) / 2)
+            assert not solid.is_inside((*center, 24))
+            assert not solid.is_inside((*center, 2.001))
+            assert solid.is_inside((*center, 1.999))
+        for end in ("min", "max"):
+            assert tuple(getattr(solid.bounding_box(), end)) == pytest.approx(
+                tuple(getattr(blank.bounding_box(), end)), abs=1e-6,
+            )
+    else:
+        mesh = trimesh.load(destination, force="mesh", process=True)
+        assert mesh.is_watertight and mesh.is_volume
+        assert len(mesh.split()) == 1
+        assert mesh.volume == pytest.approx(expected, rel=2e-5, abs=0.05)
+        for i, end in enumerate(("min", "max")):
+            assert tuple(mesh.bounds[i]) == pytest.approx(
+                tuple(getattr(blank.bounding_box(), end)), abs=2e-3,
+            )
+    assert tools == before
+    assert all(a is b for a, b in zip(tools, originals, strict=True))
