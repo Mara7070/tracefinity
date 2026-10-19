@@ -1,5 +1,6 @@
 """Fit persisted tool outer rings into explicitly sized Chappel organizers."""
 
+from collections.abc import Sequence
 from math import isfinite
 from numbers import Real
 
@@ -64,6 +65,23 @@ def edge_anchor_tool_candidates(
                 seen.add(points)
                 candidates.append(candidate)
     return tuple(candidates)
+
+
+def place_tools_in_chappel_organizer(
+    tools: Sequence[Tool],
+    cells_x: int,
+    cells_y: int,
+    gap: float,
+    inset: float = 0.0,
+) -> tuple[PlacedOutline, ...] | None:
+    """Greedily place tools in caller order using each first edge-anchor candidate."""
+    occupied: list[PlacedOutline] = []
+    for tool in tools:
+        candidates = edge_anchor_tool_candidates(tool, cells_x, cells_y, occupied, inset, gap)
+        if not candidates:
+            return None
+        occupied.append(candidates[0])
+    return tuple(occupied)
 
 
 def fit_tool_in_chappel_organizer(

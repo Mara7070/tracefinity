@@ -384,3 +384,91 @@ def test_ignored_fields_and_input_immutability(tool, container):
     assert tool.points is points_list
     assert all(a is b for a, b in zip(tool.points, points))
     assert all(a is b for a, b in zip(occupied, placements))
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("fail_at", [None, 1, 2])
+def test_greedy_exact_delegation_and_immutability(monkeypatch, container, fail_at):
+    tools = container([rectangle_tool(9, 4), rectangle_tool(3, 8), rectangle_tool(6, 2)])
+    candidates = tuple(
+        (placement([(0, 0), (size, 0), (0, size)]),
+         placement([(0, 0), (1, 0), (0, 1)], 40, 40))
+        for size in (2, 3, 4)
+    )
+    before = deepcopy(([tool.model_dump() for tool in tools], candidates))
+    tool_refs = tuple(tools)
+    point_lists = [tool.points for tool in tools]
+    calls = []
+    gap, inset = 1.25, 0.75
+
+    def delegate(tool, cells_x, cells_y, occupied, actual_inset, actual_gap):
+        index = len(calls)
+        assert tool is tools[index]
+        assert (cells_x, cells_y) == (2, 3)
+        assert actual_inset is inset
+        assert actual_gap is gap
+        assert isinstance(occupied, list)
+        assert len(occupied) == index
+        assert all(p is candidates[i][0] for i, p in enumerate(occupied))
+        calls.append(tool)
+        return () if index == fail_at else candidates[index]
+
+    monkeypatch.setattr(chappel_tool_layout, "edge_anchor_tool_candidates", delegate)
+    result = chappel_tool_layout.place_tools_in_chappel_organizer(tools, 2, 3, gap, inset)
+    assert len(calls) == (3 if fail_at is None else fail_at + 1)
+    if fail_at is None:
+        assert isinstance(result, tuple)
+        assert all(p is candidates[i][0] for i, p in enumerate(result))
+    else:
+        assert result is None
+    assert ([tool.model_dump() for tool in tools], candidates) == before
+    assert all(a is b for a, b in zip(tools, tool_refs))
+    assert all(tool.points is points for tool, points in zip(tools, point_lists))
+
+
+@pytest.mark.parametrize("dimensions,expected", [
+    ([(20, 10), (20, 10), (10, 10)],
+     [(0, 0, 20, 10), (21, 0, 41, 10), (42, 0, 52, 10)]),
+    ([(40, 20), (40, 20)], [(0, 0, 40, 20), (0, 21, 40, 41)]),
+])
+def test_greedy_rectangles_and_repeatability(dimensions, expected):
+    tools = [rectangle_tool(*size) for size in dimensions]
+    before = deepcopy(tools)
+    result = chappel_tool_layout.place_tools_in_chappel_organizer(tools, 1, 1, 1)
+    assert [p.bounds for p in result] == expected
+    assert chappel_tool_layout.place_tools_in_chappel_organizer(tools, 1, 1, 1) == result
+    assert tools == before
+
+
+def test_greedy_empty_skips_delegate(monkeypatch):
+    def unexpected(*args):
+        pytest.fail("Empty input must not delegate")
+
+    monkeypatch.setattr(chappel_tool_layout, "edge_anchor_tool_candidates", unexpected)
+    assert chappel_tool_layout.place_tools_in_chappel_organizer([], 0, 0, -1) == ()
+
+
+@pytest.mark.parametrize("tool,cells,inset,gap", [
+    (rectangle_tool(5, 5), (0, 1), 0, 1),
+    (rectangle_tool(5, 5), (1, 1), -1, 1),
+    (rectangle_tool(5, 5), (1, 1), 0, -1),
+    (make_tool([]), (1, 1), 0, 1),
+])
+def test_greedy_delegated_validation(tool, cells, inset, gap):
+    with pytest.raises(ValueError) as expected:
+        edge_candidates(tool, *cells, [], inset, gap)
+    with pytest.raises(type(expected.value)) as raised:
+        chappel_tool_layout.place_tools_in_chappel_organizer([tool], *cells, gap, inset)
+    assert str(raised.value) == str(expected.value)
+
+
+def test_greedy_preserves_delegate_exception_identity(monkeypatch):
+    error = ValueError("delegated failure")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(chappel_tool_layout, "edge_anchor_tool_candidates", fail)
+    with pytest.raises(ValueError) as raised:
+        chappel_tool_layout.place_tools_in_chappel_organizer([rectangle_tool(5, 5)], 1, 1, 1)
+    assert raised.value is error
