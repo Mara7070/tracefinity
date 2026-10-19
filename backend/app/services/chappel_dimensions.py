@@ -13,7 +13,7 @@ class ChappelDimensions:
     """Footprint and height vocabulary for the 25, 40, and 75 series.
 
     Clearances apply once per footprint axis. The preferred interface names
-    the later v2/40 interface; it does not describe mating-foot solids.
+    the later v2/40 interface. Recovered mating-foot dimensions are data only.
     """
 
     pitch: float = 55.0
@@ -23,6 +23,20 @@ class ChappelDimensions:
     short_height: float = 39.15
     full_height: float = 75.0
     preferred_interface_variant: str = "short40"
+
+    # Recovered from Mara7070/cad-apprenticeship/interfaces/chappel.py,
+    # Chappel donor corpus. Base sizes retain 75-series provenance; the
+    # physically preferred v2/40 foot adds v2_foot_size_delta.
+    grid_height: float = 4.0
+    foot_bottom_size: float = 45.4909
+    foot_chamfer: float = 2.9698
+    foot_floor_thickness: float = 1.45
+    foot_inner_at_floor: float = 44.2897
+    foot_inner_chamfer: float = 1.9445
+    foot_transition_z: float = 3.75
+    foot_outer_at_transition: float = 52.9905
+    foot_outer_at_grid_top: float = 53.3511
+    v2_foot_size_delta: float = 0.6258
 
     def bin_footprint(self, cells: int) -> float:
         """Return the ordinary 40/75 footprint along one axis."""
