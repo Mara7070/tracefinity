@@ -6,7 +6,8 @@ from numbers import Real
 from build123d import Compound, Face, Location, Plane, Solid, Wire
 
 from app.services.chappel_dimensions import CHAPPEL
-from app.services.object_geometry import PlacedOutline
+from app.services.object_collision import conflicting_pairs
+from app.services.object_geometry import CanonicalOutline, PlacedOutline
 from app.services.polygon_scaler import PolygonScaler, ScaledPolygon
 
 
@@ -60,6 +61,23 @@ def chappel_insert_with_pocket(
     The physical prism must fit the native envelope over its entire depth;
     a 2 mm structural floor remains beneath the deepest permitted pocket.
     """
+    return _insert_with_pockets((placement,), cells_x, cells_y, depth, clearance)
+
+
+def chappel_insert_with_pockets(
+    placements: tuple[PlacedOutline, ...] | list[PlacedOutline],
+    cells_x: int, cells_y: int, depth: float, clearance: float = 0.0,
+) -> Solid:
+    """Cut explicit placements after raw/expanded collision and native containment checks."""
+    if not placements:
+        raise ValueError("At least one pocket placement is required")
+    return _insert_with_pockets(tuple(placements), cells_x, cells_y, depth, clearance)
+
+
+def _insert_with_pockets(
+    placements: tuple[PlacedOutline, ...], cells_x: int, cells_y: int,
+    depth: float, clearance: float,
+) -> Solid:
     blank = chappel_insert_blank(cells_x, cells_y)
     top = CHAPPEL.organizer_height
     if (isinstance(depth, bool) or not isinstance(depth, Real)
@@ -69,12 +87,41 @@ def chappel_insert_with_pocket(
             or not isfinite(clearance) or clearance < 0):
         raise ValueError("clearance must be a finite nonnegative real number")
 
-    polygon = PolygonScaler().add_clearance(
-        ScaledPolygon("pocket", list(placement.points), ""), clearance,
+    if conflicting_pairs(placements):
+        raise ValueError("Pocket placements must not overlap or touch")
+    polygons = [
+        PolygonScaler().add_clearance(
+            ScaledPolygon("pocket", list(placement.points), ""), clearance,
+        )
+        for placement in placements
+    ]
+    expanded = tuple(
+        PlacedOutline(CanonicalOutline.from_points(polygon.points_mm))
+        for polygon in polygons
     )
+    if conflicting_pairs(expanded):
+        raise ValueError("Clearance-expanded pockets must not overlap or touch")
+    # Validate every physical prism against the original blank before cutting.
+    cutters = [
+        _contained_pocket_cutter(polygon.points_mm, blank, depth)
+        for polygon in polygons
+    ]
+    result = blank
+    for cutter in cutters:
+        result = result.cut(cutter)
+    solids = result.solids()
+    if len(solids) != 1 or not result.is_valid:
+        raise ValueError("Pocket must produce one valid Chappel insert solid")
+    return solids[0]
+
+
+def _contained_pocket_cutter(
+    points: list[tuple[float, float]], blank: Solid, depth: float,
+) -> Solid:
+    top = CHAPPEL.organizer_height
     floor = top - depth
     face = Face(Wire.make_polygon(
-        [(x, y, floor) for x, y in polygon.points_mm], close=True,
+        [(x, y, floor) for x, y in points], close=True,
     ))
     physical = Solid.extrude(face, (0, 0, depth))
     # Measure escaped material, rather than approximating the tapered envelope
@@ -84,11 +131,7 @@ def chappel_insert_with_pocket(
         raise ValueError("Pocket is not fully contained within the Chappel insert")
 
     # Only the boolean cutter overruns the top; validation used physical depth.
-    result = blank.cut(Solid.extrude(face, (0, 0, depth + 0.01)))
-    solids = result.solids()
-    if len(solids) != 1 or not result.is_valid:
-        raise ValueError("Pocket must produce one valid Chappel insert solid")
-    return solids[0]
+    return Solid.extrude(face, (0, 0, depth + 0.01))
 
 
 def _chamfered_square(size: float, chamfer: float, z: float) -> Wire:
