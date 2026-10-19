@@ -18,6 +18,8 @@ from app.services.chappel_tool_layout import minimal_chappel_organizer_sizes as 
 from app.services.chappel_tool_layout import (
     nonconflicting_tool_in_chappel_organizer as nonconflicting,
 )
+from app.services.chappel_tool_layout import place_tools_in_chappel_organizer as place
+from app.services.object_collision import placements_conflict
 from app.services.object_geometry import CanonicalOutline, PlacedOutline
 from app.services.object_layout import fit_candidates
 from app.services.object_placement import (
@@ -260,7 +262,8 @@ def test_collision_filtering_and_first(container, x, y, w, h, turns):
 ADAPTERS = [lambda tool, x, y, inset=0: fit(tool, x, y, inset),
             lambda tool, x, y, inset=0: minimal(tool, x, y, inset),
             lambda tool, x, y, inset=0: nonconflicting(tool, x, y, [], inset),
-            lambda tool, x, y, inset=0: first(tool, x, y, [], inset)]
+            lambda tool, x, y, inset=0: first(tool, x, y, [], inset),
+            lambda tool, x, y, inset=0: place([tool], x, y, inset)]
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS[:1] + ADAPTERS[2:])
@@ -330,3 +333,93 @@ def test_ignored_fields_and_input_immutability(tool, container):
     assert tool.points is points_list
     assert all(a is b for a, b in zip(tool.points, points))
     assert all(a is b for a, b in zip(occupied, placements))
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("failure", [None, 1, 2])
+def test_greedy_exact_delegation_and_immutability(monkeypatch, container, failure):
+    tools = container(make_tool([]) for _ in range(3))
+    originals = tuple(tools)
+    results = tuple(placement([(0, 0), (i + 1, 0), (0, 1)]) for i in range(3))
+    before = deepcopy((tools, results))
+    calls = []
+    inset = 0.75
+
+    def fake_first(tool, cells_x, cells_y, occupied, actual_inset):
+        index = len(calls)
+        assert tool is originals[index]
+        assert (cells_x, cells_y) == (2, 3)
+        assert actual_inset is inset
+        assert len(occupied) == index
+        assert all(a is b for a, b in zip(occupied, results[:index]))
+        calls.append((tool, tuple(occupied)))
+        return None if index == failure else results[index]
+
+    monkeypatch.setattr(chappel_tool_layout, "first_nonconflicting_tool_in_chappel_organizer", fake_first)
+    result = place(tools, 2, 3, inset)
+    assert len(calls) == (3 if failure is None else failure + 1)
+    if failure is None:
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+        assert all(a is b for a, b in zip(result, results))
+    else:
+        assert result is None
+    assert (tools, results) == before
+    assert all(a is b for a, b in zip(tools, originals))
+
+
+def test_greedy_propagates_exact_delegate_exception(monkeypatch, tool):
+    error = ValueError("delegated validation failure")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(chappel_tool_layout, "first_nonconflicting_tool_in_chappel_organizer", fail)
+    with pytest.raises(ValueError) as raised:
+        place([tool], 1, 1)
+    assert raised.value is error
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("inset", [0, 0.5, 28])
+def test_greedy_empty_validates_without_tool(container, inset):
+    assert place(container(), 1, 1, inset) == ()
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("invalid", [True, False, 1.0, 1.5, 0, -1])
+def test_greedy_empty_cell_validation(axis, invalid):
+    cells = [2, 3]
+    cells[axis] = invalid
+    with pytest.raises(ValueError) as expected:
+        CHAPPEL.organizer_footprint_xy(*cells)
+    with pytest.raises(type(expected.value), match=str(expected.value)):
+        place([], *cells)
+
+
+@pytest.mark.parametrize("inset", [-1, float("nan"), float("inf"), -float("inf")])
+def test_greedy_empty_inset_validation(tool, inset):
+    with pytest.raises(ValueError) as expected:
+        first(tool, 1, 1, [], inset)
+    with pytest.raises(type(expected.value), match=str(expected.value)):
+        place([], 1, 1, inset)
+
+
+def test_greedy_real_geometry_nonconflicting_and_deterministic():
+    tools = [make_tool([(0, 4), (4, 0), (4, 4)]), rectangle_tool(1, 1)]
+    before = deepcopy(tools)
+    result = place(tools, 1, 1, 0.5)
+    assert result is not None and len(result) == 2
+    assert result == place(tools, 1, 1, 0.5)
+    assert result[0] == first(tools[0], 1, 1, [], 0.5)
+    assert result[1] == first(tools[1], 1, 1, result[:1], 0.5)
+    assert all(not placements_conflict(a, b) for i, a in enumerate(result) for b in result[i + 1:])
+    assert tools == before
+
+
+def test_greedy_real_geometry_failure():
+    tools = [rectangle_tool(1, 1), rectangle_tool(1, 1)]
+    before = deepcopy(tools)
+    assert place(tools, 1, 1) is None
+    assert place(tools, 1, 1) is None
+    assert tools == before
