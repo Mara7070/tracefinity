@@ -15,6 +15,17 @@ from app.constants import (
 )
 
 
+class ChappelToolsExportRequest(BaseModel):
+    tool_ids: list[str]
+    max_cells_x: int
+    max_cells_y: int
+    gap: float
+    depth: float
+    format: Literal["step", "stl"]
+    inset: float = 0.0
+    clearance: float = 0.0
+
+
 class Point(BaseModel):
     x: float
     y: float

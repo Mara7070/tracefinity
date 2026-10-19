@@ -43,6 +43,7 @@ from app.models.schemas import (
     BinSummary,
     BinUpdateRequest,
     CaptureCrop,
+    ChappelToolsExportRequest,
     CornersRequest,
     CornersResponse,
     CreateBinRequest,
@@ -85,7 +86,7 @@ from app.models.schemas import (
 from app.services.ai_tracer import AITracer
 from app.services.bin_service import sync_placed_tools
 from app.services.bin_store import BinStore
-from app.services.chappel_pipeline import export_minimal_chappel_tool
+from app.services.chappel_pipeline import export_minimal_chappel_tool, export_minimal_chappel_tools
 from app.services.generation_lock import generation_lock
 from app.services.geometry import optimal_rotation_angle as _optimal_rotation_angle
 from app.services.image_ingest import ImageTooLargeError, ingest_image
@@ -1544,6 +1545,46 @@ async def get_tool(request: Request, tool_id: str, user_id: str = Depends(get_us
         data = tool.model_dump()
     data["image_context"] = image_context
     return data
+
+
+@router.post("/chappel/tools/export")
+def export_tools_chappel(
+    request: Request,
+    req: ChappelToolsExportRequest,
+    user_id: str = Depends(get_user_id),
+):
+    _, user_tools, _ = get_stores(user_id)
+    up = _user_path(user_id)
+    key = hashlib.sha256(json.dumps(req.tool_ids).encode("utf-8")).hexdigest()
+    with generation_lock(up, f"chappel-tools:{key}"):
+        tools = []
+        for tool_id in req.tool_ids:
+            tool = user_tools.get(tool_id)
+            if not tool:
+                raise HTTPException(status_code=404, detail="tool not found")
+            tools.append(tool)
+
+        output_path = up / "outputs" / f"{uuid.uuid4()}_chappel.{req.format}"
+        ready = False
+        try:
+            try:
+                export_minimal_chappel_tools(
+                    tools, req.max_cells_x, req.max_cells_y, req.gap, req.depth,
+                    output_path, req.inset, req.clearance,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = FileResponse(
+                output_path,
+                media_type="model/step" if req.format == "step" else "application/sla",
+                filename=f"tracefinity-chappel-tools.{req.format}",
+                background=BackgroundTask(output_path.unlink, missing_ok=True),
+            )
+            ready = True
+            return response
+        finally:
+            if not ready:
+                output_path.unlink(missing_ok=True)
 
 
 @router.post("/tools/{tool_id}/export-chappel")
