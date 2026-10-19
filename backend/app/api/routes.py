@@ -12,10 +12,12 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,7 @@ from app.models.schemas import (
 from app.services.ai_tracer import AITracer
 from app.services.bin_service import sync_placed_tools
 from app.services.bin_store import BinStore
+from app.services.chappel_pipeline import export_minimal_chappel_tool
 from app.services.generation_lock import generation_lock
 from app.services.geometry import optimal_rotation_angle as _optimal_rotation_angle
 from app.services.image_ingest import ImageTooLargeError, ingest_image
@@ -1541,6 +1544,47 @@ async def get_tool(request: Request, tool_id: str, user_id: str = Depends(get_us
         data = tool.model_dump()
     data["image_context"] = image_context
     return data
+
+
+@router.post("/tools/{tool_id}/export-chappel")
+def export_tool_chappel(
+    request: Request,
+    tool_id: str,
+    max_cells_x: int,
+    max_cells_y: int,
+    depth: float,
+    format: Literal["step", "stl"],
+    inset: float = 0.0,
+    clearance: float = 0.0,
+    user_id: str = Depends(get_user_id),
+):
+    _, user_tools, _ = get_stores(user_id)
+    up = _user_path(user_id)
+    with generation_lock(up, f"chappel-tool:{tool_id}"):
+        tool = user_tools.get(tool_id)
+        if not tool:
+            raise HTTPException(status_code=404, detail="tool not found")
+
+        output_path = up / "outputs" / f"{uuid.uuid4()}_chappel.{format}"
+        ready = False
+        try:
+            try:
+                export_minimal_chappel_tool(
+                    tool, max_cells_x, max_cells_y, depth, output_path, inset, clearance,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = FileResponse(
+                output_path,
+                media_type="model/step" if format == "step" else "application/sla",
+                filename=f"tracefinity-{tool_id[:8]}-chappel.{format}",
+                background=BackgroundTask(output_path.unlink, missing_ok=True),
+            )
+            ready = True
+            return response
+        finally:
+            if not ready:
+                output_path.unlink(missing_ok=True)
 
 
 @router.put("/tools/{tool_id}", response_model=StatusResponse)
