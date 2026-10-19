@@ -165,3 +165,82 @@ def test_real_service_invalid_input(api, params):
     response = export(api, **params)
     assert response.status_code == 400
     assert response.json()["detail"]
+
+
+@pytest.mark.parametrize("same_tool", [True, False])
+def test_generation_serialization(api, monkeypatch, same_tool):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event, local
+
+    from app.services.generation_lock import generation_lock
+
+    first_entered = Event()
+    release_first = Event()
+    second_attempted = Event()
+    second_entered = Event()
+    second_id = api.tool.id if same_tool else "other-tool"
+    held = local()
+    keys = []
+    reads = []
+    original_get = api.store.get
+
+    def get(tool_id):
+        assert held.lock.locked()
+        reads.append(tool_id)
+        return original_get(api.tool.id)
+
+    @contextmanager
+    def observed_lock(user_path, entity_id):
+        lock = generation_lock(user_path, entity_id)
+        keys.append((user_path, entity_id, lock))
+        if len(keys) == 2:
+            second_attempted.set()
+        with lock:
+            held.lock = lock
+            yield
+
+    def write(*args):
+        if not first_entered.is_set():
+            first_entered.set()
+            assert release_first.wait(5)
+        else:
+            second_entered.set()
+        args[4].write_bytes(b"artifact")
+
+    original_response = api.routes.FileResponse
+
+    def response(*args, **kwargs):
+        assert held.lock.locked()
+        return original_response(*args, **kwargs)
+
+    monkeypatch.setattr(api.store, "get", get)
+    monkeypatch.setattr(api.routes, "generation_lock", observed_lock)
+    monkeypatch.setattr(api.routes, "export_minimal_chappel_tool", write)
+    monkeypatch.setattr(api.routes, "FileResponse", response)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(export, api)
+        try:
+            assert first_entered.wait(5)
+            second = pool.submit(api.client.post,
+                                 f"/api/tools/{second_id}/export-chappel",
+                                 params=dict(max_cells_x=3, max_cells_y=4,
+                                             depth=12.5, format="step"))
+            assert second_attempted.wait(5)
+            if same_tool:
+                assert not second_entered.wait(0.1)
+                assert reads == [api.tool.id]
+            else:
+                assert second_entered.wait(5)
+                assert second.result(timeout=5).status_code == 200
+        finally:
+            release_first.set()
+        assert first.result(timeout=5).status_code == 200
+        assert second.result(timeout=5).status_code == 200
+    assert second_entered.is_set()
+    assert [(path, key) for path, key, _ in keys] == [
+        (api.outputs.parent, f"chappel-tool:{tool_id}")
+        for tool_id in (api.tool.id, second_id)
+    ]
+    assert (keys[0][2] is keys[1][2]) == same_tool
+    monkeypatch.setattr(api.store, "get", original_get)

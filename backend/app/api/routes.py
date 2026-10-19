@@ -1559,30 +1559,32 @@ def export_tool_chappel(
     user_id: str = Depends(get_user_id),
 ):
     _, user_tools, _ = get_stores(user_id)
-    tool = user_tools.get(tool_id)
-    if not tool:
-        raise HTTPException(status_code=404, detail="tool not found")
+    up = _user_path(user_id)
+    with generation_lock(up, f"chappel-tool:{tool_id}"):
+        tool = user_tools.get(tool_id)
+        if not tool:
+            raise HTTPException(status_code=404, detail="tool not found")
 
-    output_path = _user_path(user_id) / "outputs" / f"{uuid.uuid4()}_chappel.{format}"
-    ready = False
-    try:
+        output_path = up / "outputs" / f"{uuid.uuid4()}_chappel.{format}"
+        ready = False
         try:
-            export_minimal_chappel_tool(
-                tool, max_cells_x, max_cells_y, depth, output_path, inset, clearance,
+            try:
+                export_minimal_chappel_tool(
+                    tool, max_cells_x, max_cells_y, depth, output_path, inset, clearance,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = FileResponse(
+                output_path,
+                media_type="model/step" if format == "step" else "application/sla",
+                filename=f"tracefinity-{tool_id[:8]}-chappel.{format}",
+                background=BackgroundTask(output_path.unlink, missing_ok=True),
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        response = FileResponse(
-            output_path,
-            media_type="model/step" if format == "step" else "application/sla",
-            filename=f"tracefinity-{tool_id[:8]}-chappel.{format}",
-            background=BackgroundTask(output_path.unlink, missing_ok=True),
-        )
-        ready = True
-        return response
-    finally:
-        if not ready:
-            output_path.unlink(missing_ok=True)
+            ready = True
+            return response
+        finally:
+            if not ready:
+                output_path.unlink(missing_ok=True)
 
 
 @router.put("/tools/{tool_id}", response_model=StatusResponse)
