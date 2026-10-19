@@ -3,7 +3,13 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ProjectPage from './page'
 import * as api from '@/lib/api'
+import { downloadBlob } from '@/lib/download'
 import type { BinProject, ToolSummary } from '@/types'
+
+vi.mock('@/lib/download', async importOriginal => ({
+  ...await importOriginal<typeof import('@/lib/download')>(),
+  downloadBlob: vi.fn(),
+}))
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'p' }), useRouter: () => ({ push: vi.fn() }),
@@ -34,9 +40,7 @@ beforeEach(() => {
   vi.mocked(api.listBins).mockResolvedValue([])
   vi.mocked(api.listProjects).mockResolvedValue([])
   vi.mocked(api.getProjectHealth).mockResolvedValue({ issues: [] } as never)
-  URL.createObjectURL = vi.fn(() => 'blob:chappel')
-  URL.revokeObjectURL = vi.fn()
-  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  vi.mocked(downloadBlob).mockReset()
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -49,23 +53,17 @@ async function openExport() {
   fireEvent.click(screen.getByRole('button', { name: 'Export Chappel (2)' }))
 }
 
-it('shares selection with Create bin, sends defaults and cleans up the download URL', async () => {
+it('shares selection with Create bin, sends defaults and delegates the download', async () => {
   const blob = new Blob(['STEP'])
   vi.mocked(api.exportChappelTools).mockResolvedValue({ blob, filename: 'server.step' })
   vi.mocked(api.createProjectBin).mockRejectedValue(new Error('bin failure'))
   await openExport()
-  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
-    expect(this.download).toBe('server.step')
-    expect(this.href).toBe('blob:chappel')
-  })
   fireEvent.click(screen.getByRole('button', { name: 'Download STEP' }))
-  await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:chappel'))
+  await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(blob, 'server.step'))
   expect(api.exportChappelTools).toHaveBeenCalledWith(['z', 'a'], {
     format: 'step', max_cells_x: 6, max_cells_y: 6, gap: 2, depth: 12, clearance: 0.25, inset: 0,
   })
-  expect(URL.createObjectURL).toHaveBeenCalledWith(blob)
-  expect(click).toHaveBeenCalledTimes(1)
-  expect(document.querySelector('a[download]')).toBeNull()
+  expect(downloadBlob).toHaveBeenCalledTimes(1)
   fireEvent.click(screen.getByRole('button', { name: 'Create bin (2)' }))
   await screen.findByText('bin failure')
   expect(api.createProjectBin).toHaveBeenCalledWith('p', expect.objectContaining({ tool_ids: ['z', 'a'] }))
@@ -88,10 +86,10 @@ it.each([new api.ApiError('No fit', 422), new Error('Network failed')])('blocks 
   reject(error)
   await screen.findByText(error.message)
   expect((screen.getByRole('button', { name: 'Download STL' }) as HTMLButtonElement).disabled).toBe(false)
-  expect(URL.createObjectURL).not.toHaveBeenCalled()
+  expect(downloadBlob).not.toHaveBeenCalled()
 })
 
-it('preserves individual selection order and cleans up if the download fails', async () => {
+it('preserves individual selection order and displays shared download failures', async () => {
   vi.mocked(api.exportChappelTools).mockResolvedValue({ blob: new Blob(['STEP']), filename: 'insert.step' })
   render(<ProjectPage />)
   await screen.findByText('Workshop')
@@ -99,10 +97,9 @@ it('preserves individual selection order and cleans up if the download fails', a
   fireEvent.click(screen.getAllByTitle('Select Tool')[1])
   fireEvent.click(screen.getAllByTitle('Select Tool')[0])
   fireEvent.click(screen.getByRole('button', { name: 'Export Chappel (2)' }))
-  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => { throw new Error('Download failed') })
+  vi.mocked(downloadBlob).mockImplementation(() => { throw new Error('Download failed') })
   fireEvent.click(screen.getByRole('button', { name: 'Download STEP' }))
   await screen.findByText('Download failed')
   expect(api.exportChappelTools).toHaveBeenCalledWith(['a', 'z'], expect.any(Object))
-  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:chappel')
-  expect(document.querySelector('a[download]')).toBeNull()
+  expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), 'insert.step')
 })

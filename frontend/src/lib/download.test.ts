@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { downloadExport } from './download'
+import { downloadBlob, downloadExport } from './download'
 
 function mockResponse(status: number, headers: Record<string, string> = {}): Response {
   return {
@@ -92,5 +92,32 @@ describe('downloadExport', () => {
     await downloadExport('http://api/api/files/bins/b1/bin.stl', vi.fn())
 
     expect(clicks).toEqual([{ href: 'blob:mock', download: 'café.stl' }])
+  })
+})
+
+describe('downloadBlob', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it.each([false, true])('cleans up the anchor and object URL (click throws: %s)', throws => {
+    const blob = new Blob(['STEP'])
+    URL.createObjectURL = vi.fn(() => 'blob:mock')
+    URL.revokeObjectURL = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.isConnected).toBe(true)
+      expect(this.href).toBe('blob:mock')
+      expect(this.download).toBe('insert.step')
+      if (throws) throw new Error('Download failed')
+    })
+
+    if (throws) {
+      expect(() => downloadBlob(blob, 'insert.step')).toThrow('Download failed')
+    } else {
+      downloadBlob(blob, 'insert.step')
+    }
+
+    expect(URL.createObjectURL).toHaveBeenCalledWith(blob)
+    expect(click).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('a[download]')).toBeNull()
+    expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:mock')
   })
 })

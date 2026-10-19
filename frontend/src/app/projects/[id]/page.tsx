@@ -29,6 +29,7 @@ import { SectionHeader } from '@/components/SectionHeader'
 import { ToolSummaryButton, ToolSummaryItem } from '@/components/ToolSummaryItem'
 import { useDeleteConfirmation } from '@/hooks/useDeleteConfirmation'
 import { binDefaultsFromConfig, buildBinConfig, getDefaultBinConfig, getDefaultBinDefaults } from '@/lib/binDefaults'
+import { downloadBlob } from '@/lib/download'
 import { projectScopedHref } from '@/lib/projectNavigation'
 import {
   binLabel,
@@ -315,17 +316,7 @@ export default function ProjectPage() {
     try {
       // Set insertion order follows individual selection and project-order bulk selection.
       const { blob, filename } = await exportChappelTools(Array.from(selectedToolIds), chappelOptions)
-      const objectUrl = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      try {
-        link.href = objectUrl
-        link.download = filename
-        document.body.appendChild(link)
-        link.click()
-      } finally {
-        link.remove()
-        URL.revokeObjectURL(objectUrl)
-      }
+      downloadBlob(blob, filename)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to export Chappel insert')
     } finally {

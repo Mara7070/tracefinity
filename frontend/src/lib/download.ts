@@ -31,10 +31,22 @@ export async function downloadExport(url: string, regenerate: () => Promise<void
     throw new Error(`export download failed (${response.status})`)
   }
   const blob = await response.blob()
+  downloadBlob(blob, filenameFromDisposition(response.headers.get('content-disposition')) ?? fallbackFilename(url))
+}
+
+export function downloadBlob(blob: Blob, filename: string): void {
   const objectUrl = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = objectUrl
-  link.download = filenameFromDisposition(response.headers.get('content-disposition')) ?? fallbackFilename(url)
-  link.click()
-  URL.revokeObjectURL(objectUrl)
+  try {
+    const link = document.createElement('a')
+    try {
+      link.href = objectUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+    } finally {
+      link.remove()
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
