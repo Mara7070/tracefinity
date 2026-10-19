@@ -84,6 +84,39 @@ def place_tools_in_chappel_organizer(
     return tuple(occupied)
 
 
+def minimal_chappel_organizer_sizes_for_tools(
+    tools: Sequence[Tool],
+    max_cells_x: int,
+    max_cells_y: int,
+    gap: float,
+    inset: float = 0.0,
+) -> tuple[tuple[int, int], ...]:
+    """Return all minimum-area bounded envelopes fitting tools in caller order.
+
+    Feasibility and geometry validation belong to the existing greedy placer.
+    Every positive cell pair within the bounds is evaluated, in XY order.
+    """
+    for bound in (max_cells_x, max_cells_y):
+        if type(bound) is not int or bound < 1:
+            raise ValueError("cell bounds must be Python ints >= 1")
+    if not tools:
+        raise ValueError("tools must be nonempty")
+
+    minimum_area = None
+    sizes = []
+    for cells_x in range(1, max_cells_x + 1):
+        for cells_y in range(1, max_cells_y + 1):
+            if place_tools_in_chappel_organizer(tools, cells_x, cells_y, gap, inset) is None:
+                continue
+            area = cells_x * cells_y
+            if minimum_area is None or area < minimum_area:
+                minimum_area = area
+                sizes = [(cells_x, cells_y)]
+            elif area == minimum_area:
+                sizes.append((cells_x, cells_y))
+    return tuple(sizes)
+
+
 def fit_tool_in_chappel_organizer(
     tool: Tool, cells_x: int, cells_y: int, inset: float = 0.0
 ) -> tuple[PlacedOutline, ...]:
