@@ -161,7 +161,7 @@ def rectangular_tool():
 
 @pytest.mark.parametrize("string_path", [False, True])
 @pytest.mark.parametrize("inset,clearance,expected_inset", [
-    (0, 0, 3.0), (0.5, 0.25, 3.25), (5, 0.25, 5),
+    (0, 0, 4.0), (0.5, 0.25, 4.25), (5, 0.25, 5),
 ])
 def test_minimal_exact_delegation(monkeypatch, tmp_path, rectangular_tool, placements, string_path,
                                   inset, clearance, expected_inset):
@@ -258,8 +258,10 @@ def test_minimal_real_validation_errors(tmp_path, rectangular_tool, case):
 
 
 @pytest.mark.parametrize("suffix", [".step", ".stl"])
-@pytest.mark.parametrize("depth,small", [(12, False), (23, True)])
-def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix, depth, small):
+@pytest.mark.parametrize("depth", [12, 23])
+@pytest.mark.parametrize("small", [False, True])
+@pytest.mark.parametrize("inset,clearance", [(0, 0), (0, 0.25), (5, 0.25)])
+def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix, depth, small, inset, clearance):
     if small:
         rectangular_tool = rectangular_tool.model_copy(update={"points": [
             Point(x=x, y=y) for x, y in ((0, 0), (20, 0), (20, 10), (0, 10))
@@ -270,9 +272,13 @@ def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix, depth, small)
     )
     blank = chappel_insert_blank(1, 1 if small else 2)
     bounds = blank.bounding_box()
-    expected_volume = blank.volume - (20 * 10 if small else 60 * 20) * depth
+    width, height = (20, 10) if small else (60, 20)
+    # Layout reserves clearance, while CAD expands each pocket side only once.
+    expected_volume = blank.volume - (width + 2 * clearance) * (height + 2 * clearance) * depth
     destination = tmp_path / ("minimal" + suffix)
-    result = chappel_pipeline.export_minimal_chappel_tool(rectangular_tool, 3, 3, depth, destination)
+    result = chappel_pipeline.export_minimal_chappel_tool(
+        rectangular_tool, 3, 3, depth, destination, inset=inset, clearance=clearance,
+    )
     assert result == destination
     assert result.is_file() and result.stat().st_size > 0
     if suffix == ".step":

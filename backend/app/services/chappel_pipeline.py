@@ -80,8 +80,14 @@ def export_minimal_chappel_tool(
     if (isinstance(clearance, bool) or not isinstance(clearance, Real)
             or not isfinite(clearance) or clearance < 0):
         raise ValueError("clearance must be a finite nonnegative real number")
-    # Recovered inset reduces the full footprint per axis, so halve for each side.
-    effective_inset = max(inset, CHAPPEL.insert_mid_inset / 2 + clearance)
+    # At maximum depth the 2 mm floor keeps cutters above the bottom ramp.
+    # Reserve an axis-aligned region inside both rounded mid and full sections;
+    # recovered insets reduce the full footprint per axis, hence the half inset.
+    physical_inset = max(
+        CHAPPEL.insert_mid_inset / 2 + CHAPPEL.insert_mid_corner_radius,
+        CHAPPEL.insert_top_corner_radius,
+    )
+    effective_inset = max(inset, physical_inset + clearance)
     selected = first_minimal_chappel_organizer_fit(tool, max_cells_x, max_cells_y, effective_inset)
     if selected is None:
         raise ValueError("tool does not fit within the supplied Chappel cell bounds")
