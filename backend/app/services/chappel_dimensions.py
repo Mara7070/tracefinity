@@ -20,6 +20,15 @@ class ChappelDimensions:
     bin_footprint_clearance: float = 0.2
     organizer_footprint_clearance: float = 0.4
     organizer_height: float = 25.0
+    # External 25-series envelope; insets reduce the full size per axis.
+    insert_bottom_inset: float = 8.0
+    insert_mid_inset: float = 6.0
+    insert_bottom_ramp_z: float = 1.0
+    insert_mid_top_z: float = 10.0
+    insert_shoulder_top_z: float = 13.0
+    insert_mid_corner_radius: float = 1.0
+    insert_top_corner_radius: float = 3.0
+
     short_height: float = 39.15
     full_height: float = 75.0
     preferred_interface_variant: str = "short40"
