@@ -2,7 +2,7 @@
 // a 404 means the file expired, so regenerate and retry once instead of
 // surfacing the raw json error to the user
 
-function filenameFromDisposition(header: string | null): string | null {
+export function filenameFromDisposition(header: string | null): string | null {
   if (!header) return null
   const utf8 = /filename\*=utf-8''([^;]+)/i.exec(header)
   if (utf8) {
@@ -31,10 +31,22 @@ export async function downloadExport(url: string, regenerate: () => Promise<void
     throw new Error(`export download failed (${response.status})`)
   }
   const blob = await response.blob()
+  downloadBlob(blob, filenameFromDisposition(response.headers.get('content-disposition')) ?? fallbackFilename(url))
+}
+
+export function downloadBlob(blob: Blob, filename: string): void {
   const objectUrl = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = objectUrl
-  link.download = filenameFromDisposition(response.headers.get('content-disposition')) ?? fallbackFilename(url)
-  link.click()
-  URL.revokeObjectURL(objectUrl)
+  try {
+    const link = document.createElement('a')
+    try {
+      link.href = objectUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+    } finally {
+      link.remove()
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
