@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from build123d import Solid, export_step
+from build123d import Solid, export_step, export_stl
 
 
 def export_chappel_step(shape: Solid, output_path: str | os.PathLike[str]) -> Path:
@@ -29,4 +29,30 @@ def export_chappel_step(shape: Solid, output_path: str | os.PathLike[str]) -> Pa
         raise RuntimeError("STEP exporter reported failure")
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError("STEP export did not produce a nonempty file")
+    return path
+
+
+def export_chappel_stl(shape: Solid, output_path: str | os.PathLike[str]) -> Path:
+    """Tessellate one valid Chappel solid directly to binary STL.
+
+    The native B-rep remains canonical; STL is only a manufacturing derivative.
+    build123d's exporter defaults define tessellation for this first bounded seam.
+    """
+    if not isinstance(shape, Solid) or shape.is_null:
+        raise ValueError("shape must be a valid native Solid containing exactly one solid")
+    if len(shape.solids()) != 1 or not shape.is_valid:
+        raise ValueError("shape must be a valid native Solid containing exactly one solid")
+    try:
+        path = Path(os.fspath(output_path))
+    except TypeError as exc:
+        raise ValueError("output_path must be a string path or path-like object") from exc
+    if path.suffix.lower() != ".stl":
+        raise ValueError("output_path must have a .stl suffix")
+    if not path.parent.is_dir():
+        raise ValueError("output_path parent must exist and be a directory")
+
+    if not export_stl(shape, path):
+        raise RuntimeError("STL exporter reported failure")
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("STL export did not produce a nonempty file")
     return path
