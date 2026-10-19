@@ -23,3 +23,15 @@ def nonconflicting_fit_candidates(
         for candidate in candidates
         if not any(placements_conflict(candidate, other) for other in occupied)
     )
+
+
+def first_nonconflicting_fit_candidate(
+    outline: CanonicalOutline,
+    width: float,
+    height: float,
+    occupied: tuple[PlacedOutline, ...] | list[PlacedOutline],
+    inset: float = 0.0,
+) -> PlacedOutline | None:
+    """Return the first nonconflicting fit, preserving delegated order and errors."""
+    candidates = nonconflicting_fit_candidates(outline, width, height, occupied, inset)
+    return candidates[0] if candidates else None

@@ -6,7 +6,10 @@ import pytest
 
 from app.services.object_geometry import CanonicalOutline, PlacedOutline
 from app.services.object_layout import fit_candidates
-from app.services.object_placement import nonconflicting_fit_candidates
+from app.services.object_placement import (
+    first_nonconflicting_fit_candidate,
+    nonconflicting_fit_candidates,
+)
 
 
 def rectangle(width=1, height=1):
@@ -107,3 +110,89 @@ def test_inputs_are_unchanged(triangle, container):
     assert all(a is b for a, b in zip(occupied, original_placements))
     assert isinstance(result, tuple)
     assert all(p.outline is triangle for p in result)
+
+
+@pytest.mark.parametrize("occupied", [(), []])
+@pytest.mark.parametrize("width,height,inset", [(8, 8, 1), (6, 4, 0), (4, 6, 0), (1, 1, 1)])
+def test_first_empty_occupied_matches_direct_fit(triangle, occupied, width, height, inset):
+    direct = fit_candidates(triangle, width, height, inset)
+    assert first_nonconflicting_fit_candidate(triangle, width, height, occupied, inset) == (
+        direct[0] if direct else None
+    )
+
+
+def test_first_deterministic_orientation(triangle):
+    result = first_nonconflicting_fit_candidate(triangle, 8, 8, [], 1)
+    assert result == PlacedOutline(triangle, 1, 1, 0)
+
+
+def test_first_orientation_after_filtering(triangle):
+    occupied = [PlacedOutline(rectangle(0.25, 4), 5, 0)]
+    result = first_nonconflicting_fit_candidate(triangle, 6, 6, occupied)
+    assert result == PlacedOutline(triangle, 4, 0, 1)
+
+
+def test_first_all_filtered_returns_none(triangle):
+    assert first_nonconflicting_fit_candidate(
+        triangle, 6, 6, [PlacedOutline(rectangle(6, 6))]
+    ) is None
+
+
+def test_first_no_fit_returns_none(triangle):
+    assert first_nonconflicting_fit_candidate(triangle, 1, 1, []) is None
+
+
+@pytest.mark.parametrize(
+    "index,value",
+    [(index, value) for index in range(3)
+     for value in (float("nan"), float("inf"), -float("inf"), -1, 0)
+     if index != 2 or value != 0],
+)
+def test_first_validation_propagates(triangle, index, value):
+    args = [6, 6, 0]
+    args[index] = value
+    with pytest.raises(ValueError) as delegated:
+        nonconflicting_fit_candidates(triangle, args[0], args[1], [], args[2])
+    with pytest.raises(ValueError) as selected:
+        first_nonconflicting_fit_candidate(triangle, args[0], args[1], [], args[2])
+    assert str(selected.value) == str(delegated.value)
+
+
+@pytest.mark.parametrize("invalid_candidate", [False, True])
+def test_first_invalid_geometry_propagates(triangle, invalid_candidate):
+    crossing = CanonicalOutline.from_points(((0, 0), (4, 4), (0, 4), (3, 0)))
+    outline = crossing if invalid_candidate else triangle
+    occupied = [PlacedOutline(triangle if invalid_candidate else crossing, 20, 20)]
+    with pytest.raises(ValueError) as delegated:
+        nonconflicting_fit_candidates(outline, 6, 6, occupied)
+    with pytest.raises(ValueError) as selected:
+        first_nonconflicting_fit_candidate(outline, 6, 6, occupied)
+    assert str(selected.value) == str(delegated.value)
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+def test_first_inputs_are_unchanged(triangle, container):
+    occupied = container([PlacedOutline(rectangle(), 20, 20, 1), PlacedOutline(rectangle(), 30, 30)])
+    before = deepcopy((triangle, occupied, tuple(p.points for p in occupied)))
+    original_placements = tuple(occupied)
+    result = first_nonconflicting_fit_candidate(triangle, 8, 8, occupied, 1)
+    assert (triangle, occupied, tuple(p.points for p in occupied)) == before
+    assert all(a is b for a, b in zip(occupied, original_placements))
+    assert result.outline is triangle
+
+
+def test_first_delegates_once_and_preserves_candidate_identity(triangle, monkeypatch):
+    occupied = [PlacedOutline(rectangle(), 20, 20)]
+    candidates = fit_candidates(triangle, 8, 8, 1)
+    calls = []
+
+    def filtered(outline, width, height, existing, inset):
+        calls.append((outline, width, height, existing, inset))
+        return candidates
+
+    monkeypatch.setattr("app.services.object_placement.nonconflicting_fit_candidates", filtered)
+    assert first_nonconflicting_fit_candidate(triangle, 8, 8, occupied, 1) is candidates[0]
+    assert len(calls) == 1
+    assert calls[0] == (triangle, 8, 8, occupied, 1)
+    assert calls[0][0] is triangle
+    assert calls[0][3] is occupied
