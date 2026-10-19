@@ -70,7 +70,10 @@ it('shares selection with Create bin, sends defaults and delegates the download'
   fireEvent.click(screen.getByRole('button', { name: 'Create bin (2)' }))
   await screen.findByText('bin failure')
   expect(api.createProjectBin).toHaveBeenCalledWith('p', expect.objectContaining({ tool_ids: ['z', 'a'] }))
-  fireEvent.click(screen.getByRole('button', { name: 'Select none' }))
+  const projectSelectNone = screen.getAllByRole('button', { name: 'Select none' })
+    .find(button => !(button as HTMLButtonElement).disabled)
+  expect(projectSelectNone).toBeDefined()
+  fireEvent.click(projectSelectNone!)
   expect((screen.getByRole('button', { name: 'Download STEP' }) as HTMLButtonElement).disabled).toBe(true)
 })
 
