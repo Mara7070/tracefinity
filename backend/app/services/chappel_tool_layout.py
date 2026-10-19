@@ -19,6 +19,29 @@ def fit_tool_in_chappel_organizer(
     return fit_tool_candidates(tool, width, height, inset)
 
 
+def minimal_chappel_organizer_sizes(
+    tool: Tool, max_cells_x: int, max_cells_y: int, inset: float = 0.0
+) -> tuple[tuple[int, int], ...]:
+    """Return all bounded minimum-cell-area fitting envelopes in lexicographic order."""
+    for maximum in (max_cells_x, max_cells_y):
+        if type(maximum) is not int or maximum < 1:
+            raise ValueError("max cells must be a Python int >= 1")
+
+    minimum_area = None
+    sizes = []
+    for cells_x in range(1, max_cells_x + 1):
+        for cells_y in range(1, max_cells_y + 1):
+            if not fit_tool_in_chappel_organizer(tool, cells_x, cells_y, inset):
+                continue
+            area = cells_x * cells_y
+            if minimum_area is None or area < minimum_area:
+                minimum_area = area
+                sizes = [(cells_x, cells_y)]
+            elif area == minimum_area:
+                sizes.append((cells_x, cells_y))
+    return tuple(sizes)
+
+
 def nonconflicting_tool_in_chappel_organizer(
     tool: Tool,
     cells_x: int,

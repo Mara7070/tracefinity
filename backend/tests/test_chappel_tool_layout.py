@@ -10,6 +10,7 @@ from app.services.chappel_tool_layout import (
     first_nonconflicting_tool_in_chappel_organizer as first,
 )
 from app.services.chappel_tool_layout import fit_tool_in_chappel_organizer as fit
+from app.services.chappel_tool_layout import minimal_chappel_organizer_sizes as minimal
 from app.services.chappel_tool_layout import (
     nonconflicting_tool_in_chappel_organizer as nonconflicting,
 )
@@ -90,6 +91,7 @@ def test_collision_filtering_and_first(container, x, y, w, h, turns):
 
 
 ADAPTERS = [lambda tool, x, y, inset=0: fit(tool, x, y, inset),
+            minimal,
             lambda tool, x, y, inset=0: nonconflicting(tool, x, y, [], inset),
             lambda tool, x, y, inset=0: first(tool, x, y, [], inset)]
 
@@ -145,6 +147,7 @@ def test_invalid_polygon_unchanged(tool, adapter, invalid_tool):
 def test_ignored_fields_and_input_immutability(tool, container):
     occupied = container([placement([(0, 0), (1, 0), (0, 1)], 100, 100)])
     expected = (fit(tool, 2, 3), nonconflicting(tool, 2, 3, occupied), first(tool, 2, 3, occupied))
+    expected_sizes = minimal(tool, 2, 3)
     tool.interior_rings = [[Point(x=0, y=0)]]
     tool.finger_holes = [FingerHole(id="hole", x=0, y=0, radius=100)]
     tool.source_image_transform = [2, 0, 0, 2, 100, 200]
@@ -155,7 +158,44 @@ def test_ignored_fields_and_input_immutability(tool, container):
     before = deepcopy((tool.model_dump(), occupied))
     points_list, points, placements = tool.points, tuple(tool.points), tuple(occupied)
     assert (fit(tool, 2, 3), nonconflicting(tool, 2, 3, occupied), first(tool, 2, 3, occupied)) == expected
+    assert minimal(tool, 2, 3) == expected_sizes
     assert (tool.model_dump(), occupied) == before
     assert tool.points is points_list
     assert all(a is b for a, b in zip(tool.points, points))
     assert all(a is b for a, b in zip(occupied, placements))
+
+
+@pytest.mark.parametrize("width,height,bounds,expected", [
+    (20, 30, (4, 5), ((1, 1),)),
+    (60, 20, (4, 5), ((1, 2), (2, 1))),
+    (60, 20, (3, 1), ((2, 1),)),
+    (60, 20, (1, 3), ((1, 2),)),
+    (120, 20, (4, 4), ((1, 3), (3, 1))),
+    (120, 20, (4, 2), ((3, 1),)),
+    (60, 60, (4, 4), ((2, 2),)),
+    (60, 20, (1, 1), ()),
+    (120, 20, (2, 2), ()),
+])
+def test_minimum_area_envelopes(width, height, bounds, expected):
+    tool = make_tool([(0, 0), (width, 0), (width, height), (0, height)])
+    assert minimal(tool, *bounds) == expected
+
+
+def test_inset_increases_minimum_envelope():
+    tool = make_tool([(0, 0), (54, 0), (54, 20), (0, 20)])
+    assert minimal(tool, 3, 3) == ((1, 1),)
+    assert minimal(tool, 3, 3, 0.5) == ((1, 2), (2, 1))
+    assert minimal(tool, 1, 1, 28) == ()
+
+
+def test_search_delegates_exact_bounded_pairs_and_inset(tool, monkeypatch):
+    calls = []
+
+    def adapter(actual_tool, cells_x, cells_y, inset):
+        assert actual_tool is tool
+        calls.append((cells_x, cells_y, inset))
+        return (object(),) if (cells_x, cells_y) in {(1, 3), (2, 2), (3, 1)} else ()
+
+    monkeypatch.setattr("app.services.chappel_tool_layout.fit_tool_in_chappel_organizer", adapter)
+    assert minimal(tool, 3, 4, 0.75) == ((1, 3), (3, 1))
+    assert calls == [(x, y, 0.75) for x in range(1, 4) for y in range(1, 5)]
