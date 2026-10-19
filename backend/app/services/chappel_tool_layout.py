@@ -1,7 +1,11 @@
 """Fit persisted tool outer rings into explicitly sized Chappel organizers."""
 
+from math import isfinite
+from numbers import Real
+
 from app.models.schemas import Tool
 from app.services.chappel_dimensions import CHAPPEL
+from app.services.object_collision import placements_conflict
 from app.services.object_geometry import PlacedOutline
 from app.services.object_placement import first_nonconflicting_fit_candidate
 from app.services.tool_layout import (
@@ -9,6 +13,57 @@ from app.services.tool_layout import (
     fit_tool_candidates,
     nonconflicting_tool_candidates,
 )
+
+
+def edge_anchor_tool_candidates(
+    tool: Tool,
+    cells_x: int,
+    cells_y: int,
+    occupied: tuple[PlacedOutline, ...] | list[PlacedOutline],
+    inset: float = 0.0,
+    gap: float = 0.0,
+) -> tuple[PlacedOutline, ...]:
+    """Return distinct, noncontacting quarter turns at lower-left edge anchors.
+
+    Gap is an explicit offset from occupied bounding-box maxima, not a physical
+    spacing policy. Zero-gap anchors can be rejected because touching conflicts.
+    Orientations precede positions, which are ordered by (y, x).
+    """
+    if isinstance(gap, bool) or not isinstance(gap, Real) or not isfinite(gap) or gap < 0:
+        raise ValueError("Gap must be a finite non-negative real")
+    width, height = CHAPPEL.organizer_footprint_xy(cells_x, cells_y)
+    outline = canonical_outline_for_tool(tool)
+    inset = float(inset)
+    if not isfinite(inset) or inset < 0:
+        raise ValueError("Inset must be finite and non-negative")
+    if width <= 2 * inset or height <= 2 * inset:
+        return ()
+
+    xs, ys = {inset}, {inset}
+    for other in occupied:
+        _, _, max_x, max_y = other.bounds
+        xs.add(max_x + gap)
+        ys.add(max_y + gap)
+
+    candidates = []
+    seen = set()
+    for turns in range(4):
+        min_x, min_y, _, _ = outline.rotated_quarter_turns(turns).bounds
+        for y in sorted(ys):
+            for x in sorted(xs):
+                candidate = PlacedOutline(outline, x - min_x, y - min_y, turns)
+                left, bottom, right, top = candidate.bounds
+                if not (inset <= left and inset <= bottom
+                        and right <= width - inset and top <= height - inset):
+                    continue
+                points = candidate.points
+                if points in seen:
+                    continue
+                if any(placements_conflict(candidate, other) for other in occupied):
+                    continue
+                seen.add(points)
+                candidates.append(candidate)
+    return tuple(candidates)
 
 
 def fit_tool_in_chappel_organizer(
