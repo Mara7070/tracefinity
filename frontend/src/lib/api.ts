@@ -1,3 +1,4 @@
+import { filenameFromDisposition } from './download'
 import type {
   UploadResponse,
   CornersResponse,
@@ -599,4 +600,30 @@ export async function resetUserPassword(id: string, password: string): Promise<v
 
 export async function clearUserTwoFactor(id: string): Promise<void> {
   return fetchApi(`/api/admin/users/${id}/clear-2fa`, { method: 'POST' })
+}
+
+export interface ChappelExportOptions {
+  format: 'step' | 'stl'
+  max_cells_x: number
+  max_cells_y: number
+  gap: number
+  depth: number
+  clearance: number
+  inset: number
+}
+
+export async function exportChappelTools(
+  toolIds: string[], options: ChappelExportOptions,
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${API_URL}/api/chappel/tools/export`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...options, tool_ids: toolIds }),
+  })
+  if (!res.ok) return throwApiError(res)
+  return {
+    blob: await res.blob(),
+    filename: filenameFromDisposition(res.headers.get('content-disposition'))
+      ?? `tracefinity-chappel-tools.${options.format}`,
+  }
 }

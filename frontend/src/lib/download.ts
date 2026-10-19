@@ -2,7 +2,7 @@
 // a 404 means the file expired, so regenerate and retry once instead of
 // surfacing the raw json error to the user
 
-function filenameFromDisposition(header: string | null): string | null {
+export function filenameFromDisposition(header: string | null): string | null {
   if (!header) return null
   const utf8 = /filename\*=utf-8''([^;]+)/i.exec(header)
   if (utf8) {

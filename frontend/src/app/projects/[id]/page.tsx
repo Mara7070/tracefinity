@@ -1,11 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
   addToolsToProject,
   addBinsToProject,
   createProjectBin,
+  exportChappelTools,
+  type ChappelExportOptions,
   createProjectSketch,
   deleteProjectSketch,
   getProject,
@@ -74,7 +76,7 @@ export default function ProjectPage() {
   const [tools, setTools] = useState<ToolSummary[]>([])
   const [bins, setBins] = useState<BinSummary[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [selectedBinToolIds, setSelectedBinToolIds] = useState<Set<string>>(new Set())
+  const [selectedToolIds, setSelectedToolIds] = useState<Set<string>>(new Set())
   const [expandedBinIds, setExpandedBinIds] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
   const [projectSearch, setProjectSearch] = useState('')
@@ -92,6 +94,13 @@ export default function ProjectPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [creatingBin, setCreatingBin] = useState(false)
+  const [chappelOpen, setChappelOpen] = useState(false)
+  const [exportingChappel, setExportingChappel] = useState(false)
+  const chappelInFlight = useRef(false)
+  const [chappelOptions, setChappelOptions] = useState<ChappelExportOptions>({
+    format: 'step', max_cells_x: 6, max_cells_y: 6,
+    gap: 2, depth: 12, clearance: 0.25, inset: 0,
+  })
   const [creatingSketch, setCreatingSketch] = useState(false)
   const { deleteTarget: deleteSketchId, requestDelete: requestSketchDelete, clearDelete: clearSketchDelete } = useDeleteConfirmation<string>()
   const { deleteTarget: deleteBinId, requestDelete: requestBinDelete, clearDelete: clearBinDelete } = useDeleteConfirmation<string>()
@@ -121,7 +130,7 @@ export default function ProjectPage() {
       setBins(b)
       setHealthIssues(h?.issues || [])
       setAddToolsOpen(p.tool_ids.length === 0 ? true : savedAddToolsOpen !== null ? savedAddToolsOpen === 'true' : true)
-      setSelectedBinToolIds(new Set())
+      setSelectedToolIds(new Set())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to load project')
     } finally {
@@ -157,8 +166,8 @@ export default function ProjectPage() {
     })
   }
 
-  function toggleBinTool(toolId: string) {
-    setSelectedBinToolIds(prev => {
+  function toggleProjectTool(toolId: string) {
+    setSelectedToolIds(prev => {
       const next = new Set(prev)
       if (next.has(toolId)) next.delete(toolId)
       else next.add(toolId)
@@ -201,7 +210,7 @@ export default function ProjectPage() {
           ? { ...tool, project_ids: [...tool.project_ids, project.id] }
           : tool
       )))
-      setSelectedBinToolIds(prev => new Set([...Array.from(prev), ...toolIds]))
+      setSelectedToolIds(prev => new Set([...Array.from(prev), ...toolIds]))
       setSelected(new Set())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'failed to add tools')
@@ -286,7 +295,7 @@ export default function ProjectPage() {
           ? { ...tool, project_ids: tool.project_ids.filter(pid => pid !== project.id) }
           : tool
       )))
-      setSelectedBinToolIds(prev => {
+      setSelectedToolIds(prev => {
         const next = new Set(prev)
         next.delete(toolId)
         return next
@@ -298,14 +307,41 @@ export default function ProjectPage() {
     }
   }
 
+  async function handleExportChappel() {
+    if (selectedToolIds.size === 0 || chappelInFlight.current) return
+    chappelInFlight.current = true
+    setExportingChappel(true)
+    setError(null)
+    try {
+      // Set insertion order follows individual selection and project-order bulk selection.
+      const { blob, filename } = await exportChappelTools(Array.from(selectedToolIds), chappelOptions)
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      try {
+        link.href = objectUrl
+        link.download = filename
+        document.body.appendChild(link)
+        link.click()
+      } finally {
+        link.remove()
+        URL.revokeObjectURL(objectUrl)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed to export Chappel insert')
+    } finally {
+      chappelInFlight.current = false
+      setExportingChappel(false)
+    }
+  }
+
   async function handleCreateBin() {
-    if (!project || selectedBinToolIds.size === 0) return
+    if (!project || selectedToolIds.size === 0) return
     setCreatingBin(true)
     setError(null)
     try {
       const bin = await createProjectBin(project.id, {
         name: `${project.name} bin ${projectBins.length + 1}`,
-        tool_ids: Array.from(selectedBinToolIds),
+        tool_ids: Array.from(selectedToolIds),
         ...(project.default_bin_config ? {} : { bin_config: getDefaultBinDefaults() }),
       })
       router.push(projectScopedHref(project.id, `/bins/${bin.id}`))
@@ -402,7 +438,7 @@ export default function ProjectPage() {
   }
 
   function handleSelectVisible() {
-    setSelectedBinToolIds(new Set(actionableVisibleToolIds))
+    setSelectedToolIds(new Set(actionableVisibleToolIds))
   }
 
   if (loading) {
@@ -445,7 +481,7 @@ export default function ProjectPage() {
             <span>{projectStatusLabels[project.status]}</span>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <select
             value={project.status}
             onChange={e => handleProjectStatusChange(e.target.value as ProjectStatus)}
@@ -457,16 +493,63 @@ export default function ProjectPage() {
           </select>
           <button
             onClick={handleCreateBin}
-            disabled={creatingBin || selectedBinToolIds.size === 0}
+            disabled={creatingBin || selectedToolIds.size === 0}
             className="btn-primary px-3 py-2 text-xs flex items-center gap-1.5"
           >
             {creatingBin ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Package className="w-3.5 h-3.5" />}
-            Create bin{selectedBinToolIds.size > 0 ? ` (${selectedBinToolIds.size})` : ''}
+            Create bin{selectedToolIds.size > 0 ? ` (${selectedToolIds.size})` : ''}
+          </button>
+          <button onClick={() => setChappelOpen(open => !open)}
+            disabled={selectedToolIds.size === 0 || exportingChappel}
+            aria-expanded={chappelOpen} aria-controls="chappel-export"
+            className="btn-secondary px-3 py-2 text-xs">
+            Export Chappel{selectedToolIds.size > 0 ? ` (${selectedToolIds.size})` : ''}
           </button>
         </div>
       </div>
 
       {error && <Alert variant="error">{error}</Alert>}
+
+      {chappelOpen && (
+        <form id="chappel-export" className="glass rounded-[8px] p-3 space-y-3"
+          onSubmit={event => { event.preventDefault(); void handleExportChappel() }}>
+          <p className="text-xs text-text-secondary">Automatically size a Chappel insert for {selectedToolIds.size} selected Tools.</p>
+          <fieldset disabled={exportingChappel} className="flex flex-wrap items-end gap-3">
+            <label className="text-[11px] text-text-secondary">
+              Format
+              <select value={chappelOptions.format}
+                onChange={event => setChappelOptions(prev => ({ ...prev, format: event.target.value as 'step' | 'stl' }))}
+                className="block bg-elevated border border-border-subtle rounded-[7px] p-1 text-xs">
+                <option value="step">STEP</option>
+                <option value="stl">STL</option>
+              </select>
+            </label>
+            {([
+              ['max_cells_x', 'Max cells X', 1, 1],
+              ['max_cells_y', 'Max cells Y', 1, 1],
+              ['gap', 'Gap (mm)', 0, 0.1],
+              ['depth', 'Pocket depth (mm)', 0.1, 0.1],
+              ['clearance', 'Clearance (mm)', 0, 0.01],
+            ] as const).map(([key, label, min, step]) => (
+              <label key={key} className="text-[11px] text-text-secondary">
+                {label}
+                <input type="number" required min={min} step={step} defaultValue={chappelOptions[key]}
+                  onChange={event => setChappelOptions(prev => ({ ...prev, [key]: event.target.valueAsNumber }))}
+                  className="block w-24 bg-elevated border border-border-subtle rounded-[7px] p-1 text-xs" />
+              </label>
+            ))}
+          </fieldset>
+          <div className="flex items-center gap-2">
+            <button type="submit" disabled={exportingChappel || selectedToolIds.size === 0}
+              className="btn-primary px-3 py-2 text-xs inline-flex items-center gap-1.5">
+              {exportingChappel && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {exportingChappel ? 'Exporting…' : `Download ${chappelOptions.format.toUpperCase()}`}
+            </button>
+            <button type="button" disabled={exportingChappel} onClick={() => setChappelOpen(false)}
+              className="btn-secondary px-3 py-2 text-xs">Close</button>
+          </div>
+        </form>
+      )}
 
       <section>
         <SectionHeader
@@ -578,9 +661,9 @@ export default function ProjectPage() {
                   {label}
                 </button>
               ))}
-              <span className="text-[11px] text-text-muted">{selectedBinToolIds.size} selected for bin</span>
+              <span className="text-[11px] text-text-muted">{selectedToolIds.size} Tools selected</span>
               <button
-                onClick={() => setSelectedBinToolIds(new Set(project.tool_ids))}
+                onClick={() => setSelectedToolIds(new Set(project.tool_ids))}
                 className="btn-secondary px-2 py-1 text-[11px]"
               >
                 Select all
@@ -594,7 +677,7 @@ export default function ProjectPage() {
                 </button>
               )}
               <button
-                onClick={() => setSelectedBinToolIds(new Set())}
+                onClick={() => setSelectedToolIds(new Set())}
                 className="btn-secondary px-2 py-1 text-[11px]"
               >
                 Select none
@@ -606,7 +689,7 @@ export default function ProjectPage() {
           projectTools.length > 0 ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {filteredProjectTools.map(tool => {
-                const isSelectedForBin = selectedBinToolIds.has(tool.id)
+                const isToolSelected = selectedToolIds.has(tool.id)
                 const projectLabel = toolProjectLabel(tool.project_ids, projectNameById)
                 const binsForTool = toolBins.get(tool.id) || []
                 const metadataItems = [
@@ -623,11 +706,11 @@ export default function ProjectPage() {
                 return (
                 <div key={tool.id} className="glass rounded-[8px] px-3 py-2 min-h-[72px] flex items-start justify-between gap-2">
                   <button
-                    onClick={() => toggleBinTool(tool.id)}
+                    onClick={() => toggleProjectTool(tool.id)}
                     className="mt-5 text-text-muted hover:text-accent transition-colors cursor-pointer flex-shrink-0"
-                    title={isSelectedForBin ? 'Exclude from next bin' : 'Include in next bin'}
+                    title={isToolSelected ? 'Deselect Tool' : 'Select Tool'}
                   >
-                    {isSelectedForBin ? (
+                    {isToolSelected ? (
                       <CheckSquare className="w-4 h-4 text-accent" />
                     ) : (
                       <Square className="w-4 h-4" />
