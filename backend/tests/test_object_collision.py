@@ -4,7 +4,12 @@ from copy import deepcopy
 
 import pytest
 
-from app.services.object_collision import placements_conflict
+from app.services import object_collision
+from app.services.object_collision import (
+    conflicting_pairs,
+    placement_conflicts_any,
+    placements_conflict,
+)
 from app.services.object_geometry import CanonicalOutline, PlacedOutline
 
 
@@ -78,3 +83,83 @@ def test_inputs_remain_unchanged():
     assert (a, b, a.points, b.points, outline.points) == before
     assert a.outline is outline
     assert b.outline is outline
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+@pytest.mark.parametrize(
+    "offsets,expected",
+    [([], False), ([4, 8], False), ([4, 1], True), ([0], True), ([1, 0], True)],
+)
+def test_candidate_conflicts(container, offsets, expected):
+    candidate = PlacedOutline(rectangle())
+    occupied = container(PlacedOutline(rectangle(), x, 0) for x in offsets)
+    assert placement_conflicts_any(candidate, occupied) is expected
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+@pytest.mark.parametrize(
+    "offsets,expected",
+    [
+        ([], ()),
+        ([0], ()),
+        ([0, 4, 8], ()),
+        ([0, 1, 8], ((0, 1),)),
+        ([0, 0, 0], ((0, 1), (0, 2), (1, 2))),
+        ([0, 4, 2, 1], ((0, 2), (0, 3), (1, 2), (2, 3))),
+    ],
+)
+def test_conflicting_pair_indices(container, offsets, expected):
+    placements = container(PlacedOutline(rectangle(), x, 0) for x in offsets)
+    assert conflicting_pairs(placements) == expected
+
+
+def test_helpers_delegate_in_index_order(monkeypatch):
+    placements = [PlacedOutline(rectangle(), x, 0) for x in (0, 10, 20, 30)]
+    calls = []
+
+    def conflict(a, b):
+        calls.append((a, b))
+        return b is placements[2]
+
+    monkeypatch.setattr(object_collision, "placements_conflict", conflict)
+    assert placement_conflicts_any(placements[0], placements[1:]) is True
+    assert calls == [(placements[0], placements[1]), (placements[0], placements[2])]
+    calls.clear()
+    assert conflicting_pairs(placements) == ((0, 2), (1, 2))
+    assert calls == [
+        (placements[i], placements[j])
+        for i, j in ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+    ]
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+def test_query_helpers_propagate_invalid_geometry(container):
+    invalid = PlacedOutline(
+        CanonicalOutline.from_points(((0, 0), (4, 4), (0, 4), (3, 0)))
+    )
+    valid = PlacedOutline(rectangle(), 20, 20)
+    for a, b in ((invalid, valid), (valid, invalid), (invalid, invalid)):
+        with pytest.raises(ValueError, match="nonempty and valid"):
+            placement_conflicts_any(a, container([b]))
+        with pytest.raises(ValueError, match="nonempty and valid"):
+            conflicting_pairs(container([a, b]))
+    assert placement_conflicts_any(invalid, container()) is False
+    assert conflicting_pairs(container([invalid])) == ()
+    # A conflict ends the candidate scan before the invalid placement is reached.
+    assert placement_conflicts_any(valid, container([valid, invalid])) is True
+    with pytest.raises(ValueError, match="nonempty and valid"):
+        conflicting_pairs(container([valid, valid, invalid]))
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+def test_query_inputs_remain_unchanged(container):
+    outline = rectangle(6, 2)
+    candidate = PlacedOutline(outline, 10, 5, 1)
+    occupied = container([PlacedOutline(outline, 30, 5, 3), candidate, candidate])
+    before = deepcopy((candidate, occupied, [p.points for p in occupied], outline.points))
+    identities = tuple(id(p) for p in occupied)
+    assert placement_conflicts_any(candidate, occupied) is True
+    assert conflicting_pairs(occupied) == ((1, 2),)
+    assert (candidate, occupied, [p.points for p in occupied], outline.points) == before
+    assert tuple(id(p) for p in occupied) == identities
+    assert all(p.outline is outline for p in occupied)
