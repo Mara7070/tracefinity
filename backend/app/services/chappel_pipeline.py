@@ -1,12 +1,16 @@
 """Build explicit Chappel pockets and export one manufacturing derivative."""
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 from app.models.schemas import Tool
 from app.services.chappel_brep import chappel_insert_with_pockets
 from app.services.chappel_export import export_chappel_step, export_chappel_stl
-from app.services.chappel_tool_layout import first_minimal_chappel_organizer_fit
+from app.services.chappel_tool_layout import (
+    first_minimal_chappel_organizer_fit,
+    place_tools_in_chappel_organizer,
+)
 from app.services.object_geometry import PlacedOutline
 
 
@@ -32,6 +36,29 @@ def export_chappel_insert(
         raise ValueError("output_path must have a .step, .stp or .stl suffix")
     shape = chappel_insert_with_pockets(placements, cells_x, cells_y, depth, clearance)
     return exporter(shape, output_path)
+
+
+def export_chappel_tools(
+    tools: Sequence[Tool],
+    cells_x: int,
+    cells_y: int,
+    gap: float,
+    depth: float,
+    output_path: str | os.PathLike[str],
+    inset: float = 0.0,
+    clearance: float = 0.0,
+) -> Path:
+    """Greedily place ordered tools in an explicit envelope, then export.
+
+    Gap controls placement anchors; clearance independently expands CAD pockets.
+    Delegate errors propagate unchanged except for an explicit no-fit result.
+    """
+    placements = place_tools_in_chappel_organizer(tools, cells_x, cells_y, gap, inset)
+    if placements is None:
+        raise ValueError(
+            "ordered Tool set does not fit the supplied Chappel envelope under the greedy policy"
+        )
+    return export_chappel_insert(placements, cells_x, cells_y, depth, output_path, clearance)
 
 
 def export_minimal_chappel_tool(

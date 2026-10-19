@@ -284,3 +284,145 @@ def test_minimal_real_artifact(tmp_path, rectangular_tool, suffix):
         assert tuple(mesh.bounds[0]) == pytest.approx(tuple(bounds.min), rel=0, abs=2e-3)
         assert tuple(mesh.bounds[1]) == pytest.approx(tuple(bounds.max), rel=0, abs=2e-3)
     assert rectangular_tool == before
+
+
+@pytest.fixture
+def ordered_tools():
+    return [Tool(id=name, name=name, points=[
+        Point(x=x, y=y) for x, y in ((0, 0), (width, 0), (width, height), (0, height))
+    ]) for name, width, height in [("wide", 20, 10), ("narrow", 12, 8)]]
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("string_path", [False, True])
+def test_tools_exact_delegation(monkeypatch, tmp_path, ordered_tools, placements,
+                                container, string_path):
+    tools = container(ordered_tools)
+    before = deepcopy(tools)
+    originals = tuple(tools)
+    placement_before = deepcopy(placements)
+    original_placements = tuple(placements)
+    placer = Mock(return_value=placements)
+    returned = Path("tools-result")
+    exporter = Mock(return_value=returned)
+    monkeypatch.setattr(chappel_pipeline, "place_tools_in_chappel_organizer", placer)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    destination = tmp_path / "tools.step"
+    if string_path:
+        destination = str(destination)
+    result = chappel_pipeline.export_chappel_tools(
+        tools, 2, 3, 1.5, 12.5, destination, 2.0, 0.25,
+    )
+    placer.assert_called_once_with(tools, 2, 3, 1.5, 2.0)
+    assert placer.call_args.args[0] is tools
+    exporter.assert_called_once_with(placements, 2, 3, 12.5, destination, 0.25)
+    assert exporter.call_args.args[0] is placements
+    assert exporter.call_args.args[4] is destination
+    assert result is returned
+    assert tools == before and placements == placement_before
+    assert all(a is b for a, b in zip(tools, originals, strict=True))
+    assert all(a is b for a, b in zip(placements, original_placements, strict=True))
+
+
+@pytest.mark.parametrize("mocked", [False, True])
+def test_tools_no_fit(monkeypatch, tmp_path, rectangular_tool, mocked):
+    placer = Mock(return_value=None) if mocked else Mock(
+        wraps=chappel_pipeline.place_tools_in_chappel_organizer,
+    )
+    exporter = Mock()
+    monkeypatch.setattr(chappel_pipeline, "place_tools_in_chappel_organizer", placer)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    tools = [rectangular_tool]
+    before = deepcopy(tools)
+    with pytest.raises(ValueError) as caught:
+        chappel_pipeline.export_chappel_tools(tools, 1, 1, 1, 12, tmp_path / "no.step")
+    assert str(caught.value) == (
+        "ordered Tool set does not fit the supplied Chappel envelope under the greedy policy"
+    )
+    placer.assert_called_once_with(tools, 1, 1, 1, 0.0)
+    exporter.assert_not_called()
+    assert tools == before
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("stage", ["placement", "export"])
+@pytest.mark.parametrize("error_type", [ValueError, RuntimeError, OSError])
+def test_tools_exception_identity(monkeypatch, tmp_path, ordered_tools, placements,
+                                  stage, error_type):
+    failure = error_type("original delegate failure")
+    placer = Mock(side_effect=failure) if stage == "placement" else Mock(return_value=placements)
+    exporter = Mock(side_effect=failure)
+    monkeypatch.setattr(chappel_pipeline, "place_tools_in_chappel_organizer", placer)
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    with pytest.raises(error_type) as caught:
+        chappel_pipeline.export_chappel_tools(ordered_tools, 1, 1, 2, 12, tmp_path / "part.step")
+    assert caught.value is failure
+    placer.assert_called_once()
+    if stage == "placement":
+        exporter.assert_not_called()
+    else:
+        exporter.assert_called_once()
+
+
+def test_tools_bad_suffix_delegated_before_cad(monkeypatch, tmp_path, ordered_tools):
+    exporter = Mock(wraps=chappel_pipeline.export_chappel_insert)
+    builder = Mock(side_effect=AssertionError("must not build"))
+    monkeypatch.setattr(chappel_pipeline, "export_chappel_insert", exporter)
+    monkeypatch.setattr(chappel_pipeline, "chappel_insert_with_pockets", builder)
+    with pytest.raises(ValueError, match="output_path must have a .step, .stp or .stl suffix"):
+        chappel_pipeline.export_chappel_tools(ordered_tools, 1, 1, 2, 12, tmp_path / "part.zip", 5)
+    exporter.assert_called_once()
+    builder.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("suffix", [".step", ".stl"])
+@pytest.mark.parametrize("clearance", [0.0, 0.25])
+def test_tools_real_artifact(tmp_path, ordered_tools, suffix, clearance):
+    before = deepcopy(ordered_tools)
+    originals = tuple(ordered_tools)
+    blank = chappel_insert_blank(1, 1)
+    expected_volume = blank.volume - 12 * (
+        (20 + 2 * clearance) * (10 + 2 * clearance)
+        + (12 + 2 * clearance) * (8 + 2 * clearance)
+    )
+    destination = tmp_path / ("tools" + suffix)
+    result = chappel_pipeline.export_chappel_tools(
+        ordered_tools, 1, 1, 2, 12, destination, inset=5, clearance=clearance,
+    )
+    assert result == destination
+    assert result.is_file() and result.stat().st_size > 0
+    if suffix == ".step":
+        imported = import_step(result)
+        assert BRepCheck_Analyzer(imported.wrapped).IsValid()
+        assert len(imported.solids()) == 1
+        solid = imported.solids()[0]
+        assert solid.is_valid
+        assert solid.volume == pytest.approx(expected_volume, rel=1e-9)
+        # Greedy order puts the second rectangle to the right of the first.
+        for x, y in [(15, 10), (33, 9)]:
+            assert not solid.is_inside((x, y, 24))
+            assert solid.is_inside((x, y, 12.999))
+    else:
+        mesh = trimesh.load(result, force="mesh", process=True)
+        assert isinstance(mesh, trimesh.Trimesh)
+        assert mesh.is_watertight and mesh.is_volume
+        assert len(mesh.split()) == 1
+        assert mesh.volume == pytest.approx(expected_volume, rel=2e-5, abs=0.05)
+    assert ordered_tools == before
+    assert all(a is b for a, b in zip(ordered_tools, originals, strict=True))
+
+
+def test_tools_real_clearance_collision(tmp_path, ordered_tools):
+    before = deepcopy(ordered_tools)
+    placements = chappel_pipeline.place_tools_in_chappel_organizer(ordered_tools, 1, 1, 1, 5)
+    assert placements is not None
+    assert chappel_insert_with_pockets(placements, 1, 1, 12).is_valid
+    with pytest.raises(ValueError, match="^Clearance-expanded pockets") as direct:
+        chappel_insert_with_pockets(placements, 1, 1, 12, 0.75)
+    destination = tmp_path / "collision.step"
+    with pytest.raises(type(direct.value)) as delegated:
+        chappel_pipeline.export_chappel_tools(ordered_tools, 1, 1, 1, 12, destination, 5, 0.75)
+    assert delegated.value.args == direct.value.args
+    assert ordered_tools == before
+    assert not destination.exists()
