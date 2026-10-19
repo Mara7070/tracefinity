@@ -1,8 +1,13 @@
 """Native Chappel B-rep blanks and recovered v2/40 mating feet."""
 
-from build123d import Compound, Location, Plane, Solid, Wire
+from math import isfinite
+from numbers import Real
+
+from build123d import Compound, Face, Location, Plane, Solid, Wire
 
 from app.services.chappel_dimensions import CHAPPEL
+from app.services.object_geometry import PlacedOutline
+from app.services.polygon_scaler import PolygonScaler, ScaledPolygon
 
 
 def chappel_organizer_blank(cells_x: int, cells_y: int) -> Solid:
@@ -42,6 +47,48 @@ def chappel_insert_blank(cells_x: int, cells_y: int) -> Solid:
             section = section.fillet_2d(radius, section.vertices())
         sections.append(section)
     return Solid.make_loft(sections, ruled=True)
+
+
+def chappel_insert_with_pocket(
+    placement: PlacedOutline, cells_x: int, cells_y: int, depth: float,
+    clearance: float = 0.0,
+) -> Solid:
+    """Cut one placed outer ring downward from the recovered insert top.
+
+    Placement coordinates are millimetres in the blank's XY frame. Clearance
+    is applied once after placement, without further smoothing or reduction.
+    The physical prism must fit the native envelope over its entire depth;
+    a 2 mm structural floor remains beneath the deepest permitted pocket.
+    """
+    blank = chappel_insert_blank(cells_x, cells_y)
+    top = CHAPPEL.organizer_height
+    if (isinstance(depth, bool) or not isinstance(depth, Real)
+            or not isfinite(depth) or not 0 < depth <= top - 2.0):
+        raise ValueError("depth must be finite and satisfy 0 < depth <= 23.0 mm")
+    if (isinstance(clearance, bool) or not isinstance(clearance, Real)
+            or not isfinite(clearance) or clearance < 0):
+        raise ValueError("clearance must be a finite nonnegative real number")
+
+    polygon = PolygonScaler().add_clearance(
+        ScaledPolygon("pocket", list(placement.points), ""), clearance,
+    )
+    floor = top - depth
+    face = Face(Wire.make_polygon(
+        [(x, y, floor) for x, y in polygon.points_mm], close=True,
+    ))
+    physical = Solid.extrude(face, (0, 0, depth))
+    # Measure escaped material, rather than approximating the tapered envelope
+    # with XY bounds. The absolute tolerance is in cubic millimetres.
+    escaped = physical.cut(blank)
+    if not physical.is_valid or escaped.volume > 1e-7:
+        raise ValueError("Pocket is not fully contained within the Chappel insert")
+
+    # Only the boolean cutter overruns the top; validation used physical depth.
+    result = blank.cut(Solid.extrude(face, (0, 0, depth + 0.01)))
+    solids = result.solids()
+    if len(solids) != 1 or not result.is_valid:
+        raise ValueError("Pocket must produce one valid Chappel insert solid")
+    return solids[0]
 
 
 def _chamfered_square(size: float, chamfer: float, z: float) -> Wire:
